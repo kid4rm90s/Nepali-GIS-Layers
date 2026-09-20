@@ -7420,7 +7420,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   }
 }
   function bootstrap() {
-    wmeSDK = unsafeWindow.getWmeSdk({ scriptId: 'nepali-wms-layers-beta', scriptName });
+    wmeSDK = unsafeWindow.getWmeSdk({ scriptId: 'nepali-gis-layers', scriptName });
     console.log(`${scriptName} initialized.`);
     scriptupdatemonitor();
     // SDK event bus (replaces document.addEventListener('wme-map-data-loaded', ...)).
