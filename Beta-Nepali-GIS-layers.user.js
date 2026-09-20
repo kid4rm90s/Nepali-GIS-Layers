@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.20.024
+// @version       2026.09.20.025
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -1476,6 +1476,10 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     delete lmcLayerWindows[layerName];
     delete geoJsonLayerOffsets[layerName];
     updateGeoJsonLayerSelector();
+    // Shared teardown for both loaders, so it is also the one place a Nepal GIS ward layer
+    // can leave the map. If that was the last one, the address card has no ward polygon to
+    // resolve a code from any more and comes down (see postalUpdateAddressCard).
+    postalNotifyWardLayersChanged();
   }
 
   // Drops auto-loaded layers that have left the viewport. Two guards stop this from
@@ -3806,8 +3810,8 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     applyStoredAndPresetShifts();
 
     const { tabLabel, tabPane } = await wmeSDK.Sidebar.registerScriptTab();
-    tabLabel.innerText = 'WMS-NP';
-    tabLabel.title = 'Nepali WMS Layers';
+    tabLabel.innerText = 'GIS-NP';
+    tabLabel.title = scriptName;
     tabLabel.id = 'sidepanel-wms';
 
     injectWmsPanelStyles();
@@ -5219,6 +5223,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       '.npw-field-row > input.npw-opacity-slider { flex: 1 1 auto; min-width: 0; margin: 0 !important; }',
       '.npw-field-toggle { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 auto; font-size: 10px; color: var(--content_p1, #333); cursor: pointer; user-select: none; white-space: nowrap; }',
       '.npw-field-toggle > input.npw-checkbox { flex: 0 0 auto; width: 13px !important; height: 13px !important; min-width: 13px; margin: 0 !important; padding: 0 !important; cursor: pointer; accent-color: var(--primary, #DC143C); }',
+      '.npw-field-toggle.npw-disabled { opacity: 0.5; cursor: default; }',
       '.npw-radio-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; flex-wrap: wrap; }',
       '.npw-radio-options { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: 1 1 auto; }',
       '.npw-radio-option { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 10px; color: var(--content_p1, #333); cursor: pointer; white-space: nowrap; }',
@@ -5913,6 +5918,11 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   // Write "Bagmati Province" rather than a bare "Bagmati". On by default and switchable,
   // the same way the sub-city insert is, so an address can be written either way.
   var postalProvinceSuffix = true;
+  // The single switch in the user's words: "Show postal card address". The card is drawn
+  // ONLY when this is on AND a Nepal GIS ward (NP_W_*) KML layer is loaded - the two are
+  // ANDed, so switching it off hides the card even with the ward on the map, and having no
+  // ward loaded keeps the switch greyed out until one appears.
+  var postalCardEnabled = true;
   var postalLoadPromise = null;
   var postalUiRefreshers = []; // the Settings card re-renders itself through these
 
@@ -6435,6 +6445,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     if (typeof saved.autoLoad === 'boolean') postalAutoLoad = saved.autoLoad;
     if (typeof saved.subCity === 'boolean') postalSubCity = saved.subCity;
     if (typeof saved.provinceSuffix === 'boolean') postalProvinceSuffix = saved.provinceSuffix;
+    if (typeof saved.cardEnabled === 'boolean') postalCardEnabled = saved.cardEnabled;
   }
 
   function savePostalState() {
@@ -6443,7 +6454,32 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       autoLoad: postalAutoLoad,
       subCity: postalSubCity,
       provinceSuffix: postalProvinceSuffix,
+      cardEnabled: postalCardEnabled,
     });
+  }
+
+  /** True while at least one Nepal GIS ward polygon is loaded - the KML_Wards tree from
+   *  kid4rm90s.github.io. That is the layer the postal card's ward lookup reads: every
+   *  feature that carries the ex_Address / ex_new_ward_n fields the code is derived from
+   *  comes from it. The Lalitpur HN ward group is a different dataset and is deliberately
+   *  NOT counted - its polygons have no State Code / district / GaPa-NaPa fields, so no
+   *  postal code can be resolved from them. */
+  function postalHasWardLayer() {
+    var prefix = NP_GIS_LEVEL_PREFIX.ward;
+    for (var i = 0; i < loadedGeoJSONLayers.length; i++) {
+      var info = loadedGeoJSONLayers[i];
+      if (info.layerType !== 'ward') continue;
+      if (!prefix || String(info.name).indexOf(prefix) === 0) return true;
+    }
+    return false;
+  }
+
+  /** Re-runs the address card when the NP_W_ ward layers appear or disappear, so both the
+   *  card and the greyed-out state of its switch follow the map without waiting for the
+   *  next selection change or the next Settings repaint. */
+  function postalNotifyWardLayersChanged() {
+    postalNotifyUi();
+    postalScheduleAddressCard();
   }
 
   // "Postal Codes" card in the Settings tab: loads/refreshes the sheet, reports what is
@@ -6518,6 +6554,20 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     provinceToggle.appendChild(document.createTextNode('Combine Province in the address'));
     card.appendChild(provinceToggle);
 
+    var cardToggle = npwCreate('label', 'npw-field-toggle');
+    cardToggle.title =
+      'Show the postal address card in the edit panel when a segment or a venue is selected. ' +
+      'The card needs the Nepal GIS ward polygons to read a code from, so this switch is greyed ' +
+      'out until at least one Ward (NP_W_) layer from the Nepal GIS Layers card is loaded - see ' +
+      'the Ward level there. With no ward layer loaded there is no code to show.';
+    var cardBox = document.createElement('input');
+    cardBox.type = 'checkbox';
+    cardBox.id = 'npwPostalCardEnabled';
+    cardBox.className = 'npw-checkbox';
+    cardToggle.appendChild(cardBox);
+    cardToggle.appendChild(document.createTextNode('Show postal card address'));
+    card.appendChild(cardToggle);
+
     var buttons = npwButtonRow(card);
     var refreshBtn = npwButton(
       buttons,
@@ -6561,12 +6611,35 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       savePostalState();
       postalScheduleAddressCard();
     });
+    cardBox.addEventListener('change', function () {
+      postalCardEnabled = cardBox.checked;
+      savePostalState();
+      // The card is rebuilt from scratch, so switching this off removes the one on screen
+      // and switching it back on brings it back for the current selection.
+      postalScheduleAddressCard();
+    });
+
+    /** The switch follows the map: it is only usable while an NP_W_ ward layer is loaded,
+     *  because that layer is the only place the card's postal code comes from. */
+    function refreshPostalCardToggle() {
+      var hasWard = postalHasWardLayer();
+      cardBox.checked = !!postalCardEnabled;
+      cardBox.disabled = !hasWard;
+      cardToggle.classList.toggle('npw-disabled', !hasWard);
+      cardToggle.title = hasWard
+        ? 'Show the postal address card in the edit panel when a segment or a venue is selected. ' +
+          'Turn this off to hide the card even while the ward polygons are loaded.'
+        : 'Unavailable until a Nepal GIS Ward layer is loaded: the card reads its postal code ' +
+          'from those polygons. Tick Ward on the Nepal GIS Layers card (zoom 14+), then this ' +
+          'switch becomes available.';
+    }
 
     postalUiRefreshers.push(function () {
       wardBox.checked = !!postalWardCodes;
       autoBox.checked = !!postalAutoLoad;
       subCityBox.checked = !!postalSubCity;
       provinceBox.checked = !!postalProvinceSuffix;
+      refreshPostalCardToggle();
       statusEl.textContent = postalStatusText();
       var busy = postalStatus === 'loading';
       refreshBtn.disabled = busy;
@@ -6579,6 +6652,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     autoBox.checked = !!postalAutoLoad;
     subCityBox.checked = !!postalSubCity;
     provinceBox.checked = !!postalProvinceSuffix;
+    refreshPostalCardToggle();
     statusEl.textContent = postalStatusText();
     if (postalAutoLoad) postalEnsureLoaded(false);
   }
@@ -6957,6 +7031,19 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
 
   /** Builds and places the card for the current selection (or removes it). */
   function postalUpdateAddressCard() {
+    // Two conditions, ANDed - both must hold or there is no card:
+    //   1. the "Show postal card address" switch is on, and
+    //   2. a Nepal GIS ward (NP_W_*) KML layer is loaded, which is the only layer the
+    //      postal code is read from.
+    // So an on switch with no ward loaded shows nothing, and a loaded ward with the switch
+    // off shows nothing either. Any card left from the previous selection goes with it.
+    // The Lalitpur HN ward group is NOT part of this test: it is a different dataset whose
+    // polygons carry none of the fields the code is derived from.
+    if (!postalCardEnabled || !postalHasWardLayer()) {
+      postalRemoveAddressCard();
+      return;
+    }
+
     // Segment or place - both have a Waze address, so both get a card when they resolve.
     var target = postalResolveTarget();
     if (!target) {
@@ -7294,6 +7381,10 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
         wardNo: wardNo,
         layerType: layerType,
       });
+
+      // A ward polygon has just landed: the address card can now resolve a code, so it is
+      // rebuilt straight away (it is hidden while no ward is loaded - see postalUpdateAddressCard).
+      postalNotifyWardLayersChanged();
 
       // Update layer selector dropdown
       updateGeoJsonLayerSelector();
