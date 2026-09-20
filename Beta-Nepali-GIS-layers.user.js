@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name          Beta - Nepali WMS layers
-// @version       2026.09.14.005
+// @name          Beta - Nepali GIS layers
+// @version       2026.09.20.024
 // @author        kid4rm90s
-// @description   Displays layers from Nepali WMS services in WME
+// @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
 // @run-at        document-end
 // @namespace     https://greasyfork.org/en/users/1087400-kid4rm90s
@@ -11,16 +11,19 @@
 // @grant         unsafeWindow
 // @require       https://greasyfork.org/scripts/560385/code/WazeToastr.js
 // @require       https://update.greasyfork.org/scripts/516445/1480246/Make%20GM%20xhr%20more%20parallel%20again.js
-// @require https://update.greasyfork.org/scripts/565546/1750869/Preeti%20to%20Unicode%20Converter.js
+// @require       https://update.greasyfork.org/scripts/565546/1750869/Preeti%20to%20Unicode%20Converter.js
 // @require       https://update.greasyfork.org/scripts/542477/1742119/wmeGisLBBOX.js
-// @require             https://update.greasyfork.org/scripts/526229/1537672/GeoGMLer.js
-// @require             https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.15.0/proj4-src.js
+// @require       https://update.greasyfork.org/scripts/526229/1537672/GeoGMLer.js
+// @require       https://update.greasyfork.org/scripts/524747/1542062/GeoKMLer.js
+// @require       https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.15.0/proj4-src.js
 // @connect       geoserver.softwel.com.np
 // @connect       admin.nationalgeoportal.gov.np
 // @connect       localhost:8080
 // @connect       greasyfork.org
 // @connect       geonep.com.np
 // @connect       gis.dmgnepal.gov.np
+// @connect       kid4rm90s.github.io
+// @connect       docs.google.com
 
 // ==/UserScript==
 
@@ -34,11 +37,20 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 /* global $ */
 /* global OpenLayers */
 /* global require */
+/* global GeoKMLer */
 
 (function main() {
   ('use strict');
   const updateMessage =
-'<strong>Added:</strong><br>- <strong>Only put the current view on the map</strong> (Layers tab, "Lalitpur HN Address Wards"): each loaded ward now puts only the features inside the map view - padded by 50%, the same margin the loader uses - on its layer, and tops the layer up as you pan to the rest. A ward is still fetched once and kept in memory, so panning never re-downloads. Switch it off to put the whole loaded ward back on the map.<br>- The default feature-layer style matches the previous GeoJSON look: orange (#FF5722) outline, 2 px at 80% opacity, no polygon fill, white 13 px labels with a black outline.<br><br>';
+'<strong>What is new</strong><br>' +
+'- <strong>Postal codes:</strong> select a <em>segment</em> or a <em>venue</em> and an address card appears under its address fields, with the ward, postal code and a <em>Copy</em> button. The code comes from the published government address sheet, matched to the ward the feature actually sits in. Switch between the 7-digit ward code and the 5-digit city code, and turn the sub-city and the <em>Province</em> suffix on or off, on the <em>Settings</em> tab.<br>' +
+'- <strong>New full UI:</strong> the sidebar tab is split into <em>Layers</em>, <em>Shifting</em> and <em>Settings</em>. Layer groups are collapsible cards with a per-group <em>opacity slider</em> and one checkbox per layer, plus an on/total count - so opacity, groups and checkboxes are all under your control, and your selection and opacity are remembered.<br>' +
+'- <strong>Mostly converted to the WME SDK:</strong> layers, styling, events, keyboard shortcuts, the layer-switcher checkbox and Street View are all on the SDK now instead of the legacy <code>W</code> object and OpenLayers-2 internals. WMS tile layers stay on OL2, because the SDK has no WMS layer type yet.<br>' +
+'- <strong>One shift control for everything:</strong> a single dropdown and one 3x3 pad in the <em>Shifting</em> tab move either a WMS layer or a loaded ward layer, in metres, with <em>Reset Shift</em> and the applied shift shown underneath.<br>' +
+'- <strong>Choose what a loaded layer displays:</strong> the <em>Style Settings</em> card has a <em>Label field</em> picker, listing every property the loaded features carry - so a ward can be labelled with its postal code, ward code, district or any <code>${attr}</code> template. Applies to the LMC ward layers and both Nepal GIS levels.<br>' +
+'- <strong>User-friendly styling:</strong> Stroke Color, Font Size, Label and Outline Color (each with a <em>Match stroke</em> switch), Outline Width, Fill Opacity, Line Size / Style / Opacity and Label Position, with one global style plus an optional per-layer override. Changes redraw the layer in place - nothing is reloaded - and are saved.<br>' +
+'- <strong>Auto-loading ward layers:</strong> <em>Lalitpur HN Address Wards</em> and <em>Nepal GIS Layers</em> fetch only what is in the current view. Tick the wards, or the province / district / municipality / ward levels, and layers load as you pan and drop again once off screen.<br>' +
+'- <strong>Address and map fixes:</strong> the card no longer jumps to the top of the edit panel, Google place addresses are no longer shown (they are often wrong), and saved layer opacity is applied again after a reload instead of resetting.<br>';
   const scriptName = GM_info.script.name;
   const scriptVersion = GM_info.script.version;
   const downloadUrl = 'https://greasyfork.org/scripts/521924-nepali-wms-layers/code/nepali-wms-layers.user.js';
@@ -54,6 +66,100 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   // Refresh callbacks of the collapsible group cards' "on/total" badges. They are
   // rebuilt with the panel and re-run whenever a layer's checkbox state changes.
   var categoryCountRefreshers = [];
+
+  /* ==================================================================
+     STORAGE KEY REGISTRY
+     Every preference this script writes to localStorage is listed here,
+     with the shape of its value, so the persistence surface can be read
+     in one place instead of being searched for across 7000 lines.
+
+     The values are the literal keys the script has always used, so an
+     existing user's saved preferences are picked up unchanged. Each of
+     these is still declared as its own named constant at its point of
+     use (LMC_AUTO_STORAGE_KEY etc.), because the call sites read better
+     with a name than with NPW_STORAGE.x - this table is the index.
+     ================================================================== */
+  var NPW_STORAGE = {
+    shortcuts: '_wme_nepali_wms_shortcuts',      // { settingsKey: { raw, combo } }
+    lmcAuto: '_wme_nepali_wms_lmc_auto',         // { enabled, autoRemove, viewFilter, wards[] }
+    npGis: '_wme_nepali_wms_np_gis',             // { enabled, autoRemove, levels{} }
+    master: '_wme_nepali_wms_master',            // 'true' | 'false' (bare string)
+    opacity: '_wme_nepali_wms_opacity',          // { categoryName: number }
+    collapsed: '_wme_nepali_wms_collapsed',      // { cardStorageKey: boolean }
+    subTab: '_wme_nepali_wms_subtab',            // bare tab id (string)
+    layerOffsets: '_wme_nepali_wms_layer_offsets', // { layerName: { east, north } } in metres
+    postal: '_wme_nepali_wms_postal',            // { wardCodes, autoLoad, subCity, provinceSuffix }
+    layerTogglers: 'WMSLayers',                  // { togglerKey: boolean } - pre-existing key
+  };
+
+  /* ==================================================================
+     PERSISTENCE HELPERS
+     Every preference the script remembers lives in localStorage as JSON,
+     and every one of them has to survive a corrupt entry, a disabled
+     storage (private mode) and a full quota. Those three failure modes
+     are handled once, here, instead of in ~10 save/load pairs.
+
+     The loads return the `fallback` rather than throwing, so a caller can
+     read a store and use the result directly without its own try/catch.
+     ================================================================== */
+
+  /** Reads a JSON store, or `fallback` when it is missing, empty or corrupt. */
+  function npwLoadJson(storageKey, fallback) {
+    try {
+      var raw = localStorage.getItem(storageKey);
+      if (!raw) return fallback;
+      var parsed = JSON.parse(raw);
+      return parsed === null || parsed === undefined ? fallback : parsed;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  /** Writes a JSON store. A failed write is dropped - it must never break the script. */
+  function npwSaveJson(storageKey, value) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(value));
+    } catch (e) {
+      // Ignore: quota exceeded, storage disabled, or a serialisation failure.
+    }
+  }
+
+  // Reads one key out of a shared JSON object store - the shape `.npw-card` collapse
+  // state, per-category opacity and per-layer offsets all use. `fallback` is returned
+  // when the store has no entry for `name`.
+  function npwLoadEntry(storageKey, name, fallback) {
+    var all = npwLoadJson(storageKey, {});
+    return all && typeof all === 'object' && all[name] !== undefined ? all[name] : fallback;
+  }
+
+  /** Writes one key into a shared JSON object store, leaving the others untouched. */
+  function npwSaveEntry(storageKey, name, value) {
+    var all = npwLoadJson(storageKey, {});
+    if (!all || typeof all !== 'object') all = {};
+    all[name] = value;
+    npwSaveJson(storageKey, all);
+  }
+
+  // Reads a plain string preference. Storage returns strings, so this is the
+  // non-JSON counterpart of npwLoadJson - used by the remembered sub-tab and the
+  // master toggle, which store a bare value rather than an object.
+  function npwLoadString(storageKey, fallback) {
+    try {
+      var raw = localStorage.getItem(storageKey);
+      return raw === null ? fallback : raw;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  /** Writes a plain string preference. */
+  function npwSaveString(storageKey, value) {
+    try {
+      localStorage.setItem(storageKey, value);
+    } catch (e) {
+      // Ignore - see npwSaveJson.
+    }
+  }
 
   /* ==================================================================
      SDK KEYBOARD SHORTCUTS
@@ -152,6 +258,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   }
 
   // --- Persistence ---------------------------------------------------
+  // Unlike the other stores these two log a warning rather than staying silent: a lost
+  // shortcut assignment is something the user has to know about, because it is work they
+  // did in WME's settings rather than state the script can rebuild.
   function loadShortcutKeys() {
     try {
       var saved = JSON.parse(localStorage.getItem(SHORTCUTS_STORAGE_KEY) || '{}');
@@ -499,13 +608,63 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     outlineWidthRelative: true,  // true = outline width is fontSize / 4
     outlineWidth: 3,             // used when outlineWidthRelative is false
     labelPos: 'cm',              // horizontal (l|c|r) + vertical (t|m|b) = OL2 labelAlign
+    // Which property - or ${attr} template - becomes the feature label. '' keeps the
+    // layer type's built-in label (properties.custom_label), LABEL_FIELD_NONE hides it.
+    labelField: '',
   };
+
+  // Sentinels for the `labelField` style value.
+  var LABEL_FIELD_BUILTIN = '';        // the layer type's own label (buildings / ward)
+  var LABEL_FIELD_NONE = '__none__';   // no label at all
+  var LABEL_FIELD_CUSTOM = '__custom__'; // display-only: labelField holds a template
+
+  // Formats a label from the `labelField` value. A plain property name ("district") is
+  // the common case; WME GeoFile's ${attr} template syntax works as well, so several
+  // properties can be combined ("${district} - ${gapa_napa}") and a literal `\n`
+  // becomes a line break.
+  function npwFormatLabelTemplate(template, properties) {
+    var props = properties || {};
+    var raw = String(template);
+    if (raw.indexOf('${') === -1) {
+      var value = props[raw.trim()];
+      return value === undefined || value === null ? '' : String(value).trim();
+    }
+    return raw
+      .replace(/\$\{([^}]+)\}/g, function (match, key) {
+        var found = props[key.trim()];
+        return found === undefined || found === null ? '' : String(found);
+      })
+      .replace(/\\n/g, '\n')
+      .trim();
+  }
+
+  // One feature's label text, from the layer's style state. Reached through the
+  // styleContext getter, so it is re-evaluated on every render - which is what lets a
+  // label-field change be applied with redrawLayer() alone.
+  function npwResolveLabelText(field, properties, traits) {
+    var props = properties || {};
+    if (field === LABEL_FIELD_NONE) return '';
+    // A user-chosen field wins over the layer type's labelled/unlabelled default, which
+    // is what makes the province / district / municipality levels labelable at all.
+    if (field) return npwFormatLabelTemplate(field, props);
+    if (!traits || !traits.labelled) return '';
+    return props.custom_label || '';
+  }
+
+  /** Short single-line preview of an attribute value, for the attribute list. */
+  function npwAttrPreview(value) {
+    if (value === null || value === undefined) return '(empty)';
+    var text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return text.length > 64 ? text.slice(0, 61) + '\u2026' : text;
+  }
 
   // Per-type structure - the only thing that differs between layer kinds. Every style
   // value comes from the Style Settings card, so one global style can drive them all.
   var LAYER_TYPE_TRAITS = {
     buildings: { labelled: true, boldLabel: true },  // ward addresses, labelled
     boundary: { labelled: false, boldLabel: false }, // ward outline, unlabelled
+    // Nepal GIS ward polygons (KML): labelled with the ward title the KML carries.
+    ward: { labelled: true, boldLabel: false },
   };
 
   var STYLE_DB_NAME = 'NepaliWMSFeatureStyles';
@@ -520,52 +679,119 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   // layerName -> the mutable object the styleContext getters of that layer close over.
   // Writing into it + redrawLayer() restyles the layer without touching its features.
   var layerStyleStates = {};
+  // layerName -> fn(state): re-applied every time that layer's style state is resolved,
+  // so a structural per-layer tweak (the Nepal GIS hierarchy's per-level stroke colour
+  // and relative weight) survives a Style Settings change instead of being overwritten
+  // by the base resolve. An augment MUST be idempotent - it runs after every resolve.
+  var layerStyleAugments = {};
   var _styleDbPromise = null;
   var _styleApplyTimer = null;
+
+  // Whether this browser understands the IndexedDB 3 `IDBTransactionOptions` dictionary.
+  // Older engines ignore a third argument to `transaction()` rather than throwing, so passing
+  // it unconditionally would be harmless - but a future spec change could make it a TypeError,
+  // and this keeps the intent explicit. Probed once, then cached.
+  var _idbDurabilitySupported = null;
+  function idbSupportsDurability() {
+    if (_idbDurabilitySupported !== null) return _idbDurabilitySupported;
+    _idbDurabilitySupported = false;
+    try {
+      // A probe database that is deleted immediately - the only reliable feature test for a
+      // dictionary member that is otherwise silently ignored.
+      var probe = indexedDB.open('_npw_idb_probe_' + Date.now());
+      probe.onsuccess = function () {
+        var db = probe.result;
+        try {
+          var tx = db.transaction([], 'readonly', { durability: 'relaxed' });
+          _idbDurabilitySupported = !!tx && tx.durability === 'relaxed';
+        } catch (e) {
+          _idbDurabilitySupported = false;
+        }
+        db.close();
+        try {
+          indexedDB.deleteDatabase(db.name);
+        } catch (e) {
+          // Ignore - the probe database is tiny and carries no data.
+        }
+      };
+    } catch (e) {
+      _idbDurabilitySupported = false;
+    }
+    return _idbDurabilitySupported;
+  }
+
+  // The third argument for `db.transaction()`, in the shape the IndexedDB 3 spec defines.
+  // Everything this script stores in IndexedDB is a CACHE - the feature styles, the LMC ward
+  // bounding boxes and the postal sheet are all re-derivable, and the postal entry even carries
+  // its own 24-hour TTL. The spec is explicit about this case: users are "encouraged to use
+  // `relaxed` for ephemeral data such as caches", because a relaxed commit returns as soon as
+  // the data reaches the OS rather than waiting for a flush to disk, while `strict` trades that
+  // latency for durability across a power loss.
+  // Nothing here is worth that trade, so every transaction asks for relaxed and falls back to
+  // the engine default (`{}`) on an engine that does not know the dictionary.
+  function idbCacheTransactionOptions() {
+    return idbSupportsDurability() ? { durability: 'relaxed' } : {};
+  }
 
   // --- IndexedDB: one 'styles' store holding the global style, the per-layer
   //     overrides and the cached LMC ward bounding boxes ---
   function openStyleDb() {
     if (_styleDbPromise) return _styleDbPromise;
-    _styleDbPromise = new Promise(function (resolve, reject) {
-      var request;
+    _styleDbPromise = (async function () {
+      // Clear a stale copy of our own database first - see idbDropStaleStores. This cannot
+      // throw and cannot block: on an engine without databases() it is a no-op, and a blocked
+      // delete resolves false. The open below is what actually has to succeed.
       try {
-        request = indexedDB.open(STYLE_DB_NAME, STYLE_DB_VERSION);
+        await idbDropStaleStores();
       } catch (e) {
-        reject(e);
-        return;
+        // Ignore - cleanup is a convenience, never a precondition.
       }
-      request.onupgradeneeded = function (event) {
-        var db = event.target.result;
-        if (!db.objectStoreNames.contains(STYLE_DB_STORE)) {
-          db.createObjectStore(STYLE_DB_STORE, { keyPath: 'key' });
+      return new Promise(function (resolve, reject) {
+        var request;
+        try {
+          request = indexedDB.open(STYLE_DB_NAME, STYLE_DB_VERSION);
+        } catch (e) {
+          reject(e);
+          return;
         }
-      };
-      request.onsuccess = function (event) {
-        resolve(event.target.result);
-      };
-      request.onerror = function () {
-        reject(request.error);
-      };
-    }).catch(function (e) {
-      console.warn(scriptName + ': IndexedDB is unavailable, styles and the ward index will not persist.', e);
-      _styleDbPromise = null;
-      return null;
-    });
+        request.onupgradeneeded = function (event) {
+          var db = event.target.result;
+          if (!db.objectStoreNames.contains(STYLE_DB_STORE)) {
+            db.createObjectStore(STYLE_DB_STORE, { keyPath: 'key' });
+          }
+        };
+        request.onsuccess = function (event) {
+          resolve(event.target.result);
+        };
+        request.onerror = function () {
+          reject(request.error);
+        };
+      });
+    })()
+      .catch(function (e) {
+        console.warn(scriptName + ': IndexedDB is unavailable, styles and the ward index will not persist.', e);
+        _styleDbPromise = null;
+        return null;
+      });
     return _styleDbPromise;
   }
 
   // Runs one transaction and resolves with whatever the request returned. Resolves
   // with null when IndexedDB is unavailable, so every caller keeps working without
   // persistence instead of breaking.
-  function styleDbRequest(mode, run) {
+  //
+  // `commitNow` closes the transaction the moment the request succeeds rather than letting
+  // the engine wait to see whether more work is queued (IndexedDB 3's `IDBTransaction.commit()`).
+  // It exists for the one write here that carries real volume - see postalSaveCached - and is
+  // ignored on an engine without `commit()`, where the transaction closes on its own.
+  function styleDbRequest(mode, run, commitNow) {
     return openStyleDb()
       .then(function (db) {
         if (!db) return null;
         return new Promise(function (resolve, reject) {
           var tx;
           try {
-            tx = db.transaction([STYLE_DB_STORE], mode);
+            tx = db.transaction([STYLE_DB_STORE], mode, idbCacheTransactionOptions());
           } catch (e) {
             reject(e);
             return;
@@ -576,6 +802,13 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
           if (request) {
             request.onsuccess = function () {
               result = request.result;
+              if (commitNow && typeof tx.commit === 'function') {
+                try {
+                  tx.commit();
+                } catch (e) {
+                  // Already closing, which is the outcome commit() was asking for anyway.
+                }
+              }
             };
             request.onerror = function () {
               reject(request.error);
@@ -613,6 +846,71 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   function styleDbDelete(key) {
     return styleDbRequest('readwrite', function (store) {
       return store.delete(key);
+    });
+  }
+
+  // Lists the IndexedDB databases this origin holds, via the IndexedDB 3 `databases()` method.
+  // Not supported everywhere yet (Chrome 71+, Edge 79+, Firefox 126+, Safari 14+), so it is
+  // probed before use and resolves with `null` on an engine without it - which is why every
+  // caller treats the result as optional rather than assuming a list.
+  // @returns {Promise<Array<{name: string, version: number}>|null>} null when unsupported.
+  function idbListDatabases() {
+    try {
+      if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') {
+        return Promise.resolve(null);
+      }
+      return indexedDB.databases().catch(function () {
+        return null;
+      });
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+  }
+
+  // Deletes our own database if it is left over from a schema this build no longer uses.
+  // The styles store is shared by the feature styles, the LMC ward bounding boxes and the
+  // postal sheet, so a change to its shape has to be able to start clean rather than read
+  // records it can no longer interpret. `databases()` is what makes that check cheap: without
+  // it, the only way to spot a stale copy is to open the database and inspect its stores.
+  // Nothing is deleted on a guess. The name must match ours exactly, the version must be one
+  // this build does not expect, AND the store must be missing or unrecognised - so a database
+  // this build can still read is never touched, however old it is.
+  // @returns {Promise<boolean>} true when a stale copy was deleted.
+  async function idbDropStaleStores() {
+    var list = await idbListDatabases();
+    if (!Array.isArray(list)) return false;
+
+    var mine = list.filter(function (entry) {
+      return entry && entry.name === STYLE_DB_NAME;
+    });
+    if (mine.length === 0) return false;
+
+    var stale = mine.some(function (entry) {
+      // A FUTURE version of our own database is not ours to delete - a newer build owns it.
+      return typeof entry.version === 'number' && entry.version < STYLE_DB_VERSION;
+    });
+    if (!stale) return false;
+
+    return new Promise(function (resolve) {
+      var request;
+      try {
+        request = indexedDB.deleteDatabase(STYLE_DB_NAME);
+      } catch (e) {
+        resolve(false);
+        return;
+      }
+      request.onsuccess = function () {
+        console.log(scriptName + ': removed a stale "' + STYLE_DB_NAME + '" database.');
+        resolve(true);
+      };
+      request.onerror = function () {
+        resolve(false);
+      };
+      // Another tab holding the old database open blocks the delete; the cached data is
+      // rebuilt on the next fetch either way, so this is not worth surfacing.
+      request.onblocked = function () {
+        resolve(false);
+      };
     });
   }
 
@@ -679,15 +977,27 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     return state;
   }
 
+  /** Re-runs a layer's structural style tweak, if it registered one. */
+  function applyLayerStyleAugment(layerName) {
+    var augment = layerStyleAugments[layerName];
+    if (!augment) return;
+    var state = layerStyleStates[layerName];
+    if (!state) return;
+    augment(state);
+  }
+
   // styleContext for one layer. The SDK re-calls these getters on every render pass,
   // which is what makes redrawLayer() enough to restyle a loaded layer.
   function buildLayerStyleContext(layerName, layerType) {
     var state = layerStyleStates[layerName];
     var traits = LAYER_TYPE_TRAITS[layerType] || LAYER_TYPE_TRAITS.buildings;
     return {
+      // The label source is the layer's `labelField`, read live so redrawLayer() is
+      // enough to change it: '' = the type's built-in label, a sentinel = no label,
+      // anything else is a property name or a ${attr} template.
       getLabel: function (context) {
-        if (!traits.labelled) return '';
-        return (context && context.feature && context.feature.properties && context.feature.properties.custom_label) || '';
+        var properties = (context && context.feature && context.feature.properties) || {};
+        return npwResolveLabelText(state.labelField, properties, traits);
       },
       getStroke: function () { return state.strokeColor; },
       getLineOpacity: function () { return state.lineOpacity; },
@@ -722,7 +1032,10 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
           fontColor: '${getFontColor}',
           fontWeight: traits.boldLabel ? 'bold' : 'normal',
           fontFamily: 'inherit',
-          label: traits.labelled ? '${getLabel}' : '',
+          // Always routed through the getter, never '' for an unlabelled type: both the
+          // labelled/unlabelled trait and the user's labelField resolve inside getLabel,
+          // so a field can be set on a layer type that is unlabelled by default.
+          label: '${getLabel}',
           labelAlign: '${getLabelAlign}',
           labelOutlineColor: '${getLabelOutlineColor}',
           labelOutlineWidth: '${getLabelOutlineWidth}',
@@ -746,6 +1059,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       if (onlyLayerName && info.name !== onlyLayerName) return;
       if (!layerStyleStates[info.name]) return;
       writeLayerStyleState(info.name, resolveStyleValues(rawStyleValues(info.name)));
+      applyLayerStyleAugment(info.name);
       try {
         wmeSDK.Map.redrawLayer({ layerName: info.name });
         refreshed++;
@@ -972,11 +1286,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     wmeSDK.Map.dangerouslyAddFeaturesToLayerWithoutValidation({ features: features, layerName: layerName });
   }
 
-  /**
-   * Makes a layer carry exactly the features inside the padded view.
-   * `force` re-windows even when the current window already covers the view - used after
-   * a load, a shift or a switch flip, when the coordinates or the mode changed.
-   */
+  // Makes a layer carry exactly the features inside the padded view.
+  // `force` re-windows even when the current window already covers the view - used after
+  // a load, a shift or a switch flip, when the coordinates or the mode changed.
   function windowLayerFeatures(info, force) {
     if (!info) return;
 
@@ -1062,10 +1374,8 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     rewindowLoadedFeatureLayers(true);
   }
 
-  /**
-   * Ensures a bbox is known for every ward, reading the IndexedDB cache first and
-   * deriving the missing ones from the ward boundary files (batched, one time only).
-   */
+  // Ensures a bbox is known for every ward, reading the IndexedDB cache first and
+  // deriving the missing ones from the ward boundary files (batched, one time only).
   async function ensureLmcWardBboxes() {
     if (lmcWardBboxes && Object.keys(lmcWardBboxes).length >= LMC_WARD_COUNT) return lmcWardBboxes;
     if (lmcBboxBuildPromise) return lmcBboxBuildPromise;
@@ -1162,16 +1472,15 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     }
     lmcActiveLayers.delete(layerName);
     delete layerStyleStates[layerName];
+    delete layerStyleAugments[layerName];
     delete lmcLayerWindows[layerName];
     delete geoJsonLayerOffsets[layerName];
     updateGeoJsonLayerSelector();
   }
 
-  /**
-   * Drops auto-loaded layers that have left the viewport. Two guards stop this from
-   * thrashing while panning: a padded viewport (hysteresis) and a grace period, which
-   * also keeps a pan back instant. LMC_MAX_LAYERS stays as a hard cap.
-   */
+  // Drops auto-loaded layers that have left the viewport. Two guards stop this from
+  // thrashing while panning: a padded viewport (hysteresis) and a grace period, which
+  // also keeps a pan back instant. LMC_MAX_LAYERS stays as a hard cap.
   async function pruneLmcLayers(viewport) {
     if (!Array.isArray(viewport)) return 0;
     var keep = lmcPadBbox(viewport, LMC_EVICT_PADDING);
@@ -1309,34 +1618,23 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 
   // --- Ward group state (localStorage: prefs, IndexedDB: data) ---
   function loadLmcAutoState() {
-    try {
-      var saved = JSON.parse(localStorage.getItem(LMC_AUTO_STORAGE_KEY) || '{}');
-      lmcAutoEnabled = !!saved.enabled;
-      lmcAutoRemoveEnabled = saved.autoRemove !== false;
-      lmcViewFilterEnabled = saved.viewFilter !== false;
-      lmcEnabledWards = {};
-      (saved.wards || []).forEach(function (ward) {
-        lmcEnabledWards[Number(ward)] = true;
-      });
-    } catch (e) {
-      console.warn(scriptName + ': could not read the ward group state', e);
-    }
+    var saved = npwLoadJson(LMC_AUTO_STORAGE_KEY, {});
+    lmcAutoEnabled = !!saved.enabled;
+    lmcAutoRemoveEnabled = saved.autoRemove !== false;
+    lmcViewFilterEnabled = saved.viewFilter !== false;
+    lmcEnabledWards = {};
+    (saved.wards || []).forEach(function (ward) {
+      lmcEnabledWards[Number(ward)] = true;
+    });
   }
 
   function saveLmcAutoState() {
-    try {
-      localStorage.setItem(
-        LMC_AUTO_STORAGE_KEY,
-        JSON.stringify({
-          enabled: lmcAutoEnabled,
-          autoRemove: lmcAutoRemoveEnabled,
-          viewFilter: lmcViewFilterEnabled,
-          wards: Object.keys(lmcEnabledWards).map(Number),
-        })
-      );
-    } catch (e) {
-      // Ignore - a failed preference write must never break the script.
-    }
+    npwSaveJson(LMC_AUTO_STORAGE_KEY, {
+      enabled: lmcAutoEnabled,
+      autoRemove: lmcAutoRemoveEnabled,
+      viewFilter: lmcViewFilterEnabled,
+      wards: Object.keys(lmcEnabledWards).map(Number),
+    });
   }
 
   function setLmcAutoEnabled(enabled) {
@@ -1395,6 +1693,874 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       await removeLmcLayer(names[i]);
     }
     setLmcStatus(names.length > 0 ? 'Cleared ' + names.length + ' layer(s)' : 'Nothing to clear');
+    if (names.length > 0) {
+      WazeToastr.Alerts.success(scriptName, 'Removed ' + names.length + ' layer(s)', false, false, 2000);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+     "Nepal GIS Layers" - hierarchy viewport auto-loader
+     Ported from the WME GeoFile script (WME-NP-GIS-Layers). Same viewport model as
+     the LMC ward loader above (bbox test + padded eviction + grace period +
+     debounce), but the areas are DISCOVERED from the published manifests instead of
+     a fixed ward list, so the whole country is covered:
+
+       KML_Wards/index.json            province tier (7 entries, each with a bbox)
+       KML_Wards/<PROV>/index.json     one entry per local unit: file + bbox
+       KML_Wards/<PROV>/<DIST>/<Mun>/<file>.kml
+
+     Both manifest tiers carry the bbox, so no per-ward bbox needs deriving the way
+     the LMC endpoints forced - a ward KML is only downloaded once its manifest bbox
+     intersects the view. Downloads are parsed once per session and kept in
+     npGisFeatureCache / npGisOutlineCache, so a pan back is free.
+
+     The four hierarchy levels come from three sources:
+       province          ->  outlines/province.json        (all 7, dissolved)
+       district          ->  outlines/<PROV>-<DISTRICT>.json
+       municipality      ->  KML_Municipality/<PROV>/<Mun>.kml  (per local unit)
+       ward              ->  KML_Wards/<PROV>/.../<unit>.kml    (per local unit)
+     Both KML tiers publish a two-stage manifest (index.json -> <PROV>/index.json),
+     and every manifest item carries its own bbox, so a file is only ever fetched when
+     its OWN bbox is in view. The outlines/ files carry their bbox in-file.
+
+     `KML_Province/<PROV>.kml` exists but is deliberately NOT used: it is a province-wide
+     BUNDLE of municipality polygons (schema name "Nepal_Local_Level_Label", 124
+     placemarks for Bagmati, 4.8-6.8 MB) and not a province outline at all. The
+     dissolved province geometry only exists in outlines/province.json, which covers all
+     seven provinces in ~690 KB.
+
+     The country level of the source script is not ported, so `wmeGisLBBOX` is never
+     called here - the manifest and outline bboxes are the only viewport test.
+
+     The KMLs are GeoFile exports: GeoKMLer prefixes every <SimpleData> name with
+     "ex_", so the ward label lives in NP_GIS_LABEL_FIELD (ex_Address).
+     ------------------------------------------------------------------ */
+  var NP_GIS_PAGES_ROOT = 'https://kid4rm90s.github.io/WME-Nepal-GIS-Layers/';
+  var NP_GIS_WARDS_PATH = 'KML_Wards/';
+  var NP_GIS_MUNICIPALITY_PATH = 'KML_Municipality/';
+  var NP_GIS_OUTLINES_PATH = 'outlines/';   // dissolved province/district outlines
+  var NP_GIS_ROOT_INDEX = 'index.json';
+  var NP_GIS_LABEL_FIELD = 'ex_Address';    // GeoKMLer-prefixed ward title
+  var NP_GIS_DEBOUNCE_MS = 400;             // debounce applied to wme-map-move-end
+  var NP_GIS_FETCH_CONCURRENCY = 4;         // parallel downloads per batch
+  // Higher than the LMC loader's 60 on purpose: the municipality level is one layer per
+  // local unit (730 nationally), so a dense view can hold many small layers at once.
+  var NP_GIS_MAX_LAYERS = 120;              // hard cap on the number of viewport layers
+  var NP_GIS_EVICT_PADDING = 0.5;           // keep a layer until it is 50% of a viewport clear
+  var NP_GIS_EVICT_GRACE_MS = 8000;         // ...and only once it has been out of range this long
+  var NP_GIS_KML_TIMEOUT_MS = 60000;        // one KML can be ~0.5 MB, so allow longer than JSON
+  var NP_GIS_OUTLINE_TIMEOUT_MS = 60000;    // province.json is ~0.7 MB on its own
+  var NP_GIS_AUTO_STORAGE_KEY = '_wme_nepali_wms_np_gis';
+
+  // Draw order, bottom -> top: parent fills must render underneath the ward outlines.
+  // Only the ticked levels are ever requested.
+  var NP_GIS_LEVELS = ['province', 'district', 'municipality', 'ward'];
+  var NP_GIS_LEVEL_LABEL = {
+    province: 'Province',
+    district: 'District',
+    municipality: 'Municipality',
+    ward: 'Ward',
+  };
+  // One layer-name / id prefix per level, e.g. NP_P_BA / NP_D_BA_BHAKTAPUR /
+  // NP_M_BA_BHAKTAPUR / NP_W_BA_BHAKTAPUR_Bhaktapur.
+  var NP_GIS_LEVEL_PREFIX = {
+    province: 'NP_P_',
+    district: 'NP_D_',
+    municipality: 'NP_M_',
+    ward: 'NP_W_',
+  };
+  // Only a stroke colour and a relative line weight stay per level, so the hierarchy stays
+  // readable when several levels are drawn at once. Every other style value - font size,
+  // line opacity/style, fill opacity, label colour, outline and position - still comes from
+  // the Style Settings card, applied through layerStyleAugments so a style change cannot
+  // drop the level's colour or weight.
+  var NP_GIS_LEVEL_STYLE = {
+    province: { color: '#E53935', weight: 3 },      // red
+    district: { color: '#FB8C00', weight: 2 },      // orange
+    municipality: { color: '#26C6DA', weight: 2 },  // cyan
+    ward: { color: '#e100ff', weight: 1 },          // magenta
+  };
+  // The outline levels are drawn from dissolved polygons that carry no display name of
+  // their own, so they were originally routed through the unlabelled 'boundary' type.
+  // They now get a per-level DEFAULT LABEL instead (see NP_GIS_LEVEL_DEFAULT_LABEL), and
+  // because a set labelField short-circuits the labelled/unlabelled trait in
+  // npwResolveLabelText, the 'boundary' type still renders those labels correctly.
+  var NP_GIS_OUTLINE_LAYER_TYPE = 'boundary';
+
+  // Minimum zoom at which each level is loaded. Everything is load-on-demand, so a level
+  // that is below its gate is simply not fetched - and its already-loaded layers are
+  // dropped again, because a gate that left its layers behind would not gate anything
+  // (see pruneNpGisLayersAboveZoom).
+  var NP_GIS_LEVEL_MIN_ZOOM = {
+    province: 8,
+    district: 10,
+    municipality: 11,
+    ward: 14,
+  };
+
+  // The label each level uses while the user has not picked a label field of their own
+  // (see npGisLevelAugment). These are the same ${attr} templates the Style Settings
+  // label-field box accepts, so they can be copied there to be edited.
+  // The ward level is absent on purpose: it keeps its built-in ex_Address label.
+  // NOTE: `ex\u0938\u094d\u0925` is a Devanagari SimpleField name in the KML_Municipality
+  // export, and the `\n` is the formatter's line-break escape (a real newline here would
+  // simply end the string literal).
+  var NP_GIS_LEVEL_DEFAULT_LABEL = {
+    province: 'name',
+    district: 'district',
+    municipality: '${ex_Changed_Na}\\n${ex_\u0938\u094d\u0925}',
+  };
+
+  var npGisEnabled = false;                 // master switch of the group
+  var npGisAutoRemoveEnabled = true;        // drop layers that leave the padded viewport
+  // Ward only by default: it is the level the loader was ported for, and the three outline
+  // levels are wide fills that would hide the map if they came on unasked.
+  var npGisLevelsEnabled = { province: false, district: false, municipality: false, ward: true };
+  var npGisDebounceTimer = null;
+  var npGisEvictTimer = null;
+  var npGisUpdateInFlight = false;
+  var npGisRootIndexCache = null;           // KML_Wards/index.json
+  var npGisProvinceIndexCache = new Map();  // provKey -> the KML_Wards province manifest
+  var npGisMunicipalityIndexCache = new Map(); // provKey -> the KML_Municipality manifest
+  var npGisFeatureCache = new Map();        // base path + file -> Promise<{ geojson, features }>
+  var npGisOutlineCache = new Map();        // outlines/... path -> Promise<features>
+  var npGisActiveLayers = new Map();        // layer name -> { level, file, bbox, lastSeen }
+  var npGisPropertyLogged = false;          // one-off diagnostic of a parsed KML's property keys
+
+  /** True while at least one hierarchy level is ticked. */
+  function npGisAnyLevelEnabled() {
+    return NP_GIS_LEVELS.some(function (level) {
+      return !!npGisLevelsEnabled[level];
+    });
+  }
+
+  /** True when `zoom` is close enough in for the level to be loaded. */
+  function npGisLevelAllowedAtZoom(level, zoom) {
+    var min = NP_GIS_LEVEL_MIN_ZOOM[level];
+    return min === undefined || zoom >= min;
+  }
+
+  /** The ticked levels that are also allowed at `zoom`, in draw order. */
+  function npGisLevelsAtZoom(zoom) {
+    return NP_GIS_LEVELS.filter(function (level) {
+      return !!npGisLevelsEnabled[level] && npGisLevelAllowedAtZoom(level, zoom);
+    });
+  }
+
+  /** Layer name for a level + key, sanitised the way the SDK layer ids expect. */
+  function npGisLevelLayerName(level, key) {
+    var prefix = NP_GIS_LEVEL_PREFIX[level] || 'NP_X_';
+    return prefix + String(key).replace(/[^a-z0-9_-]/gi, '_');
+  }
+
+  /** Builds a GitHub Pages URL from a repo-relative path (Pages paths are case-sensitive). */
+  function npGisUrl(relPath) {
+    return NP_GIS_PAGES_ROOT + relPath.split('/').map(encodeURIComponent).join('/');
+  }
+
+  // GETs a text resource through GM_xmlhttpRequest (no CORS limits). `headers` is
+  // optional and used by the postal-code loader, which talks to Google Sheets.
+  function npGisFetchText(url, timeoutMs, headers) {
+    return new Promise(function (resolve, reject) {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url,
+        headers: headers || {},
+        timeout: timeoutMs || 30000,
+        onload: function (response) {
+          if (response.status < 200 || response.status >= 300) {
+            reject(new Error('HTTP ' + response.status + ' for ' + url));
+            return;
+          }
+          resolve(response.responseText);
+        },
+        onerror: function () {
+          reject(new Error('network error for ' + url));
+        },
+        ontimeout: function () {
+          reject(new Error('request timeout for ' + url));
+        },
+      });
+    });
+  }
+
+  function getNpGisRootIndex() {
+    if (!npGisRootIndexCache) {
+      npGisRootIndexCache = npGisFetchText(npGisUrl(NP_GIS_WARDS_PATH + NP_GIS_ROOT_INDEX))
+        .then(function (text) {
+          return JSON.parse(text);
+        })
+        .catch(function (e) {
+          npGisRootIndexCache = null; // allow a retry on a later pass
+          throw e;
+        });
+    }
+    return npGisRootIndexCache;
+  }
+
+  function getNpGisProvinceIndex(provKey, relPath) {
+    if (!npGisProvinceIndexCache.has(provKey)) {
+      npGisProvinceIndexCache.set(
+        provKey,
+        npGisFetchText(npGisUrl(NP_GIS_WARDS_PATH + relPath))
+          .then(function (text) {
+            return JSON.parse(text);
+          })
+          .catch(function (e) {
+            npGisProvinceIndexCache.delete(provKey); // allow a retry on a later pass
+            throw e;
+          })
+      );
+    }
+    return npGisProvinceIndexCache.get(provKey);
+  }
+
+  /** The KML_Municipality manifest of one province (one entry per local unit). */
+  function getNpGisMunicipalityIndex(provKey) {
+    if (!npGisMunicipalityIndexCache.has(provKey)) {
+      npGisMunicipalityIndexCache.set(
+        provKey,
+        npGisFetchText(npGisUrl(NP_GIS_MUNICIPALITY_PATH + provKey + '/' + NP_GIS_ROOT_INDEX))
+          .then(function (text) {
+            return JSON.parse(text);
+          })
+          .catch(function (e) {
+            npGisMunicipalityIndexCache.delete(provKey); // allow a retry on a later pass
+            throw e;
+          })
+      );
+    }
+    return npGisMunicipalityIndexCache.get(provKey);
+  }
+
+  /** Layer name / key for one ward manifest item: NP_W_BA_BHAKTAPUR_Bhaktapur. */
+  function npGisLayerNameFor(item) {
+    var base = String(item.file || '').split('/').pop().replace(/\.kml$/i, '');
+    return npGisLevelLayerName('ward', base);
+  }
+
+  // Per-level structural style, registered through layerStyleAugments so it survives a
+  // Style Settings change. `state.lineSize` is MULTIPLIED by the level's relative weight
+  // rather than overwritten, so the hierarchy keeps its proportions when the Line Size
+  // slider moves - which is exactly why this has to re-run after every style resolve.
+  function npGisLevelAugment(level) {
+    var levelStyle = NP_GIS_LEVEL_STYLE[level] || {};
+    var defaultLabel = NP_GIS_LEVEL_DEFAULT_LABEL[level] || '';
+    return function (state) {
+      if (levelStyle.color) state.strokeColor = levelStyle.color;
+      state.lineSize = (Number(state.lineSize) || 0) * (levelStyle.weight || 1);
+      // The sentinels mean "follow the stroke colour", and resolveStyleValues already
+      // resolved them against the BASE colour - so that has to be redone here.
+      if (state.labelColorSync) state.labelColor = state.strokeColor;
+      if (state.outlineColorSync) state.outlineColor = state.strokeColor;
+      // The level's default label applies only while nothing has been chosen for it: an
+      // empty labelField means "the layer type's built-in label", and for these levels the
+      // built-in label IS the level default. LABEL_FIELD_NONE and any user template are
+      // non-empty, so either one wins and survives the next style resolve.
+      if (!state.labelField && defaultLabel) state.labelField = defaultLabel;
+    };
+  }
+
+  // GeoKMLer hands back Multi* geometries, and every split part must own its properties
+  // object: createGeoJSONLayer writes `__bbox` and `custom_label` per feature, so a
+  // shared properties object would make the last part's bbox win for all of them.
+  // Z ordinates are stripped later by createGeoJSONLayer (removeZCoordinates).
+  function npGisFlattenCollection(collection) {
+    var features = [];
+    var source = (collection && collection.features) || [];
+
+    var cloneProperties = function (properties) {
+      var copy = {};
+      Object.keys(properties || {}).forEach(function (key) {
+        copy[key] = properties[key];
+      });
+      return copy;
+    };
+
+    var push = function (geometry, properties) {
+      features.push({ type: 'Feature', geometry: geometry, properties: cloneProperties(properties) });
+    };
+
+    source.forEach(function (feature) {
+      if (!feature || !feature.geometry) return;
+      var geometry = feature.geometry;
+      var properties = feature.properties || {};
+      var parts = geometry.coordinates;
+
+      if (geometry.type === 'MultiPolygon' && Array.isArray(parts)) {
+        parts.forEach(function (polygon) {
+          push({ type: 'Polygon', coordinates: polygon }, properties);
+        });
+      } else if (geometry.type === 'MultiLineString' && Array.isArray(parts)) {
+        parts.forEach(function (line) {
+          push({ type: 'LineString', coordinates: line }, properties);
+        });
+      } else if (geometry.type === 'MultiPoint' && Array.isArray(parts)) {
+        parts.forEach(function (point) {
+          push({ type: 'Point', coordinates: point }, properties);
+        });
+      } else {
+        push(geometry, properties);
+      }
+    });
+
+    return { type: 'FeatureCollection', features: features };
+  }
+
+  // Downloads + parses one KML once per session (the parsed features are reused, so a pan
+  // back is free). `basePath` keeps the two KML trees apart - a ward file and a
+  // municipality file can share a basename, so the cache key is the full relative path.
+  function getNpGisKmlFeatures(basePath, item) {
+    var cacheKey = basePath + item.file;
+    if (!npGisFeatureCache.has(cacheKey)) {
+      npGisFeatureCache.set(
+        cacheKey,
+        npGisFetchText(npGisUrl(cacheKey), NP_GIS_KML_TIMEOUT_MS)
+          .then(function (text) {
+            if (typeof GeoKMLer !== 'function') {
+              throw new Error('GeoKMLer is unavailable - check the @require entry');
+            }
+            var reader = new GeoKMLer();
+            var collection = npGisFlattenCollection(reader.toGeoJSON(reader.read(text), true));
+            if (collection.features.length > 0 && !npGisPropertyLogged) {
+              npGisPropertyLogged = true;
+              console.log(
+                scriptName + ': Nepal GIS KML property keys (' + cacheKey + ') ->',
+                Object.keys(collection.features[0].properties)
+              );
+            }
+            return { geojson: collection, features: collection.features };
+          })
+          .catch(function (e) {
+            npGisFeatureCache.delete(cacheKey); // allow a retry on a later pass
+            throw e;
+          })
+      );
+    }
+    return npGisFeatureCache.get(cacheKey);
+  }
+
+  // Downloads + caches one dissolved-outline FeatureCollection. These files are already
+  // WGS84 with no Z, so no transform pass is needed - but they ARE flattened, because
+  // province.json ships two MultiPolygons and the ward KMLs are flattened for the same
+  // reason (single geometries are what the SDK layer handling is happiest with).
+  function getNpGisOutlineFeatures(relPath) {
+    if (!npGisOutlineCache.has(relPath)) {
+      npGisOutlineCache.set(
+        relPath,
+        npGisFetchText(npGisUrl(NP_GIS_OUTLINES_PATH + relPath), NP_GIS_OUTLINE_TIMEOUT_MS)
+          .then(function (text) {
+            var collection = npGisFlattenCollection(JSON.parse(text));
+            if (collection.features.length === 0) {
+              throw new Error('no features in ' + relPath);
+            }
+            return collection.features;
+          })
+          .catch(function (e) {
+            npGisOutlineCache.delete(relPath); // allow a retry on a later pass
+            throw e;
+          })
+      );
+    }
+    return npGisOutlineCache.get(relPath);
+  }
+
+  // Creates one outline layer for a level, from the features a single outline file holds
+  // for that level.
+  // DELIBERATE DEVIATION from WME GeoFile: that script keys its district layer by PROVINCE
+  // and appends every visible district to it, which forces a parts-Set per layer and an
+  // append path that has to keep its own feature store in sync. Here each outline file
+  // becomes its own layer per level (NP_D_BA_BHAKTAPUR), so a layer is always created whole
+  // and never appended to - eviction then works per district instead of per province, and
+  // nothing has to be pushed into loadedGeoJSONLayers after creation.
+  async function addNpGisOutlineLayer(level, layerKey, relPath, bbox, select, displayKey) {
+    if (!npGisLevelsEnabled[level]) return 0;
+
+    var layerName = npGisLevelLayerName(level, layerKey);
+    if (npGisActiveLayers.has(layerName) || findGeoJsonLayer(layerName)) return 0;
+
+    var features = (await getNpGisOutlineFeatures(relPath)).filter(select);
+    if (features.length === 0) return 0;
+
+    npGisActiveLayers.set(layerName, { level: level, file: relPath, bbox: bbox, lastSeen: Date.now() });
+    layerStyleAugments[layerName] = npGisLevelAugment(level);
+    try {
+      createGeoJSONLayer(
+        { type: 'FeatureCollection', features: features },
+        layerName,
+        displayKey,
+        NP_GIS_OUTLINE_LAYER_TYPE
+      );
+    } catch (e) {
+      npGisActiveLayers.delete(layerName); // allow a retry on a later pass
+      delete layerStyleAugments[layerName];
+      throw e;
+    }
+    return 1;
+  }
+
+  /** Fetches one in-view ward KML and puts it on its own layer. */
+  async function addNpGisWardLayer(item) {
+    var layerName = npGisLayerNameFor(item);
+    // Already tracked, or loaded by hand earlier - nothing to do either way.
+    if (npGisActiveLayers.has(layerName) || findGeoJsonLayer(layerName)) return 0;
+
+    var loaded = await getNpGisKmlFeatures(NP_GIS_WARDS_PATH, item);
+    if (!loaded.features.length) {
+      console.warn(scriptName + ': ' + item.file + ' produced no features - skipped.');
+      return 0;
+    }
+
+    npGisActiveLayers.set(layerName, { level: 'ward', file: item.file, bbox: item.bbox, lastSeen: Date.now() });
+    layerStyleAugments[layerName] = npGisLevelAugment('ward');
+    try {
+      // 'ward' type: labelled from custom_label, which createGeoJSONLayer fills from
+      // the KML's ex_Address. `wardNo` only feeds the log line; the shift pairing in
+      // shiftGeoJsonLayer looks for LMC_Ward_* partners and simply finds none.
+      createGeoJSONLayer(loaded.geojson, layerName, item.municipality || item.district, 'ward');
+    } catch (e) {
+      npGisActiveLayers.delete(layerName); // allow a retry on a later pass
+      delete layerStyleAugments[layerName];
+      throw e;
+    }
+    return 1;
+  }
+
+  // Fetches one in-view municipality KML and puts it on its own layer. The file path is
+  // `<PROV>/<Municipality>.kml`, so both the province key and the layer name come from it.
+  // Unlabelled on purpose: this tree is a raw ArcGIS export whose attribute names are
+  // unusable (`District_2`, `GAPA_NAP_2`, `GN_TYPE_13`, plus one mojibake Devanagari
+  // field name), so only the geometry and the manifest bbox are taken from it.
+  async function addNpGisMunicipalityLayer(item) {
+    if (!npGisLevelsEnabled.municipality) return 0;
+
+    var relPath = String(item.file || '');
+    var provKey = relPath.split('/')[0];
+    var base = relPath.split('/').pop().replace(/\.kml$/i, '');
+    var layerName = npGisLevelLayerName('municipality', provKey + '_' + base);
+    if (npGisActiveLayers.has(layerName) || findGeoJsonLayer(layerName)) return 0;
+
+    var loaded = await getNpGisKmlFeatures(NP_GIS_MUNICIPALITY_PATH, item);
+    if (!loaded.features.length) {
+      console.warn(scriptName + ': ' + item.file + ' produced no features - skipped.');
+      return 0;
+    }
+
+    npGisActiveLayers.set(layerName, {
+      level: 'municipality',
+      file: item.file,
+      bbox: item.bbox,
+      lastSeen: Date.now(),
+    });
+    layerStyleAugments[layerName] = npGisLevelAugment('municipality');
+    try {
+      createGeoJSONLayer(
+        loaded.geojson,
+        layerName,
+        item.municipality || base,
+        NP_GIS_OUTLINE_LAYER_TYPE
+      );
+    } catch (e) {
+      npGisActiveLayers.delete(layerName); // allow a retry on a later pass
+      delete layerStyleAugments[layerName];
+      throw e;
+    }
+    return 1;
+  }
+
+  /** Downloads manifest items in batches, tolerating a per-item failure. */
+  async function loadNpGisBatch(items, loader) {
+    var added = 0;
+    for (var offset = 0; offset < items.length; offset += NP_GIS_FETCH_CONCURRENCY) {
+      var batch = items.slice(offset, offset + NP_GIS_FETCH_CONCURRENCY);
+      var results = await Promise.all(
+        batch.map(function (item) {
+          return loader(item).catch(function (e) {
+            console.warn(scriptName + ': could not load ' + item.file, e);
+            return 0;
+          });
+        })
+      );
+      added += results.reduce(function (total, value) {
+        return total + value;
+      }, 0);
+    }
+    return added;
+  }
+
+  // Removes one Nepal GIS layer. removeLmcLayer() is the shared single-layer teardown
+  // (SDK layer + loadedGeoJSONLayers entry + style state + window + offset + dropdown
+  // refresh), so it is reused here rather than duplicated.
+  async function removeNpGisLayer(layerName) {
+    npGisActiveLayers.delete(layerName);
+    await removeLmcLayer(layerName);
+  }
+
+  // Drops auto-loaded ward layers that have left the viewport. Same two guards as the
+  // LMC loader: a padded viewport (hysteresis) and a grace period, which also keeps a
+  // pan back instant. NP_GIS_MAX_LAYERS stays as a hard cap.
+  async function pruneNpGisLayers(viewport) {
+    if (!Array.isArray(viewport)) return 0;
+    var keep = lmcPadBbox(viewport, NP_GIS_EVICT_PADDING);
+    var now = Date.now();
+    var removed = 0;
+
+    if (npGisAutoRemoveEnabled) {
+      var waiting = [];
+      var entries = Array.from(npGisActiveLayers.entries());
+      for (var i = 0; i < entries.length; i++) {
+        var layerName = entries[i][0];
+        var record = entries[i][1];
+        if (!Array.isArray(record.bbox)) continue; // no bbox to test - never evicted by position
+        if (lmcBboxesIntersect(keep, record.bbox)) {
+          record.lastSeen = now;
+          continue;
+        }
+        var idle = now - record.lastSeen;
+        if (idle >= NP_GIS_EVICT_GRACE_MS) {
+          await removeNpGisLayer(layerName);
+          removed++;
+        } else {
+          waiting.push(NP_GIS_EVICT_GRACE_MS - idle);
+        }
+      }
+      // Nothing else would trigger another pass if the user stops panning now.
+      if (waiting.length > 0) scheduleNpGisEvictionCheck(Math.min.apply(null, waiting) + 250);
+    }
+
+    // Hard cap safety net (always active, even with auto-remove switched off).
+    var excess = npGisActiveLayers.size - NP_GIS_MAX_LAYERS;
+    if (excess > 0) {
+      var oldestFirst = Array.from(npGisActiveLayers.entries()).sort(function (a, b) {
+        return a[1].lastSeen - b[1].lastSeen;
+      });
+      for (var j = 0; j < oldestFirst.length; j++) {
+        if (excess <= 0) break;
+        await removeNpGisLayer(oldestFirst[j][0]);
+        removed++;
+        excess--;
+      }
+    }
+
+    return removed;
+  }
+
+  // Drops the layers of levels that `zoom` is too far out for.
+  // Unlike the position-based eviction above this is IMMEDIATE, with no padding or grace
+  // period: a zoom gate that left its layers behind would not gate anything, and a
+  // province-wide view would otherwise keep every ward polygon it had ever loaded.
+  // Nothing is lost by it - the parsed KMLs stay in npGisFeatureCache, so zooming back in
+  // re-creates the layers without touching the network.
+  async function pruneNpGisLayersAboveZoom(zoom) {
+    var names = [];
+    npGisActiveLayers.forEach(function (record, layerName) {
+      // A level the user has switched off is left to setNpGisLevelEnabled().
+      if (!npGisLevelsEnabled[record.level]) return;
+      if (npGisLevelAllowedAtZoom(record.level, zoom)) return;
+      names.push(layerName);
+    });
+    for (var i = 0; i < names.length; i++) {
+      await removeNpGisLayer(names[i]);
+    }
+    return names.length;
+  }
+
+  // Master routine. Levels are gated by zoom first (see NP_GIS_LEVEL_MIN_ZOOM), then
+  // intersection testing happens in stages so only the files that can actually be visible
+  // are ever downloaded:
+  //   1. the root manifest's province bboxes;
+  //   2. per province, the ward manifest's per-local-unit bboxes (which also give the
+  //      districts in view) and the municipality manifest's own per-local-unit bboxes.
+  // The province level reads the shared outlines/province.json and the district level
+  // outlines/<PROV>-<DISTRICT>.json; municipalities and wards each read their own
+  // per-local-unit KML tree, so every layer owns the bbox it was fetched for. Lighter
+  // files load first and the ward KMLs (up to ~0.5 MB each) last. Every pass ends by
+  // pruning the layers that have drifted out of the viewport.
+  async function updateNpGisViewportLayers() {
+    if (!npGisEnabled || npGisUpdateInFlight) return;
+    npGisUpdateInFlight = true;
+
+    var viewport = lmcViewportBbox();
+    try {
+      if (!viewport) {
+        setNpGisStatus('Waiting for the map…');
+        return;
+      }
+
+      if (!npGisAnyLevelEnabled()) {
+        setNpGisStatus('No level ticked');
+        await pruneNpGisLayers(viewport);
+        return;
+      }
+
+      var zoom = 0;
+      try {
+        zoom = wmeSDK.Map.getZoomLevel();
+      } catch (e) {
+        // Assume the most permissive gate rather than blocking every level.
+        zoom = NP_GIS_LEVEL_MIN_ZOOM.ward;
+      }
+
+      // Levels below their zoom gate are dropped first, so the pass below only ever sees
+      // what the current zoom is actually allowed to show.
+      var zoomRemoved = await pruneNpGisLayersAboveZoom(zoom);
+      var levelsAllowed = npGisLevelsAtZoom(zoom);
+
+      if (levelsAllowed.length === 0) {
+        await pruneNpGisLayers(viewport);
+        setNpGisStatus(
+          'Zoom ' +
+            zoom +
+            ' — ' +
+            NP_GIS_LEVELS.filter(function (level) {
+              return !!npGisLevelsEnabled[level];
+            })
+              .map(function (level) {
+                return NP_GIS_LEVEL_LABEL[level] + ' needs zoom ' + NP_GIS_LEVEL_MIN_ZOOM[level] + '+';
+              })
+              .join(', ')
+        );
+        return;
+      }
+
+      var isLevelAllowed = function (level) {
+        return levelsAllowed.indexOf(level) !== -1;
+      };
+
+      var rootIndex = await getNpGisRootIndex();
+      var provinces = [];
+      var provinceMap = (rootIndex && rootIndex.provinces) || {};
+      Object.keys(provinceMap).forEach(function (provKey) {
+        var info = provinceMap[provKey] || {};
+        if (Array.isArray(info.bbox) && lmcBboxesIntersect(viewport, info.bbox)) {
+          provinces.push({ key: provKey, info: info });
+        }
+      });
+
+      if (provinces.length === 0) {
+        var noneInView = await pruneNpGisLayers(viewport);
+        setNpGisStatus(
+          'No Nepal province in view' + (noneInView > 0 ? ' — removed ' + noneInView + ' layer(s)' : '')
+        );
+        return;
+      }
+
+      setNpGisStatus(
+        'Scanning ' +
+          provinces
+            .map(function (province) {
+              return province.info.name || province.key;
+            })
+            .join(', ') +
+          '…'
+      );
+
+      var wantedWards = [];
+      var wantedMunicipalities = [];
+      var added = 0;
+      var outlineErrors = 0;
+      var noteOutlineError = function (e) {
+        outlineErrors++;
+        console.warn(scriptName + ': could not load an outline layer', e);
+        return 0;
+      };
+
+      for (var p = 0; p < provinces.length; p++) {
+        var provKey = provinces[p].key;
+        var info = provinces[p].info;
+        var provinceIndex = null;
+        try {
+          provinceIndex = await getNpGisProvinceIndex(provKey, info.index || provKey + '/index.json');
+        } catch (e) {
+          console.warn(scriptName + ': could not load the ' + provKey + ' ward manifest', e);
+          continue;
+        }
+
+        // Province outline: a single feature selected out of the shared province.json.
+        if (isLevelAllowed('province')) {
+          added += await addNpGisOutlineLayer(
+            'province',
+            provKey,
+            'province.json',
+            Array.isArray(info.bbox) ? info.bbox : null,
+            function (feature) {
+              return feature.properties && feature.properties.province === provKey;
+            },
+            info.name || provKey
+          ).catch(noteOutlineError);
+        }
+
+        // A district's bbox is the union of the local units the manifest lists for it,
+        // which is also the test for whether its outline file is worth downloading.
+        var items = (provinceIndex && provinceIndex.items) || [];
+        var districts = new Map();
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          if (!Array.isArray(item.bbox) || !lmcBboxesIntersect(viewport, item.bbox)) continue;
+          var known = districts.get(item.district);
+          districts.set(item.district, {
+            bbox: known ? lmcUnionBbox(known.bbox, item.bbox) : item.bbox,
+          });
+          wantedWards.push(item);
+        }
+
+        if (isLevelAllowed('district')) {
+          var districtKeys = Array.from(districts.keys());
+          for (var d = 0; d < districtKeys.length; d++) {
+            var districtKey = districtKeys[d];
+            added += await addNpGisOutlineLayer(
+              'district',
+              provKey + '_' + districtKey,
+              provKey + '-' + districtKey + '.json',
+              districts.get(districtKey).bbox,
+              function (feature) {
+                return feature.properties && feature.properties.level === 'district';
+              },
+              districtKey
+            ).catch(noteOutlineError);
+          }
+        }
+
+        // Municipalities read their own per-local-unit manifest, so each layer gets its own
+        // bbox and a whole district file is never fetched just to reach one local unit.
+        if (isLevelAllowed('municipality')) {
+          try {
+            var munIndex = await getNpGisMunicipalityIndex(provKey);
+            var munItems = (munIndex && munIndex.items) || [];
+            for (var m = 0; m < munItems.length; m++) {
+              if (Array.isArray(munItems[m].bbox) && lmcBboxesIntersect(viewport, munItems[m].bbox)) {
+                wantedMunicipalities.push(munItems[m]);
+              }
+            }
+          } catch (e) {
+            console.warn(scriptName + ': could not load the ' + provKey + ' municipality manifest', e);
+          }
+        }
+      }
+
+      // Then the downloads, lightest first: a municipality KML is ~13 KB, a ward KML up to
+      // ~0.5 MB.
+      if (isLevelAllowed('municipality')) {
+        added += await loadNpGisBatch(wantedMunicipalities, addNpGisMunicipalityLayer);
+      }
+      if (isLevelAllowed('ward')) {
+        added += await loadNpGisBatch(wantedWards, addNpGisWardLayer);
+      }
+
+      var removed = await pruneNpGisLayers(viewport);
+      var levelsOn = levelsAllowed.join(' + ') || 'none';
+      var summary =
+        (added > 0 ? 'Added ' + added + ' layer(s)' : 'Up to date') +
+        ' — ' +
+        npGisActiveLayers.size +
+        ' loaded [zoom ' +
+        zoom +
+        ': ' +
+        levelsOn +
+        ']';
+      if (removed > 0) summary += ', removed ' + removed;
+      if (zoomRemoved > 0) summary += ', ' + zoomRemoved + ' below zoom gate';
+      if (outlineErrors > 0) summary += ' — ' + outlineErrors + ' outline file(s) unavailable';
+      setNpGisStatus(summary);
+    } catch (e) {
+      console.error(scriptName + ': Nepal GIS viewport update failed', e);
+      setNpGisStatus('Error: ' + e.message);
+    } finally {
+      npGisUpdateInFlight = false;
+    }
+  }
+
+  /** Updates the sidebar status line for the Nepal GIS loader. */
+  function setNpGisStatus(text) {
+    var element = document.getElementById('npGisStatus');
+    if (element) element.textContent = text;
+  }
+
+  /** Debounces viewport updates so rapid panning does not trigger repeated fetches. */
+  function scheduleNpGisViewportUpdate() {
+    if (!npGisEnabled) return;
+    clearTimeout(npGisDebounceTimer);
+    npGisDebounceTimer = setTimeout(function () {
+      updateNpGisViewportLayers();
+    }, NP_GIS_DEBOUNCE_MS);
+  }
+
+  /** Queues one follow-up pass so a layer inside its grace period still gets removed. */
+  function scheduleNpGisEvictionCheck(delayMs) {
+    if (npGisEvictTimer) return; // a pass is already queued
+    npGisEvictTimer = setTimeout(function () {
+      npGisEvictTimer = null;
+      if (npGisEnabled) updateNpGisViewportLayers();
+    }, Math.max(delayMs, 250));
+  }
+
+  // --- Group state (localStorage) ---
+  function loadNpGisState() {
+    var saved = npwLoadJson(NP_GIS_AUTO_STORAGE_KEY, {});
+    npGisEnabled = !!saved.enabled;
+    npGisAutoRemoveEnabled = saved.autoRemove !== false;
+    if (saved.levels && typeof saved.levels === 'object') {
+      NP_GIS_LEVELS.forEach(function (level) {
+        if (typeof saved.levels[level] === 'boolean') npGisLevelsEnabled[level] = saved.levels[level];
+      });
+    }
+  }
+
+  function saveNpGisState() {
+    npwSaveJson(NP_GIS_AUTO_STORAGE_KEY, {
+      enabled: npGisEnabled,
+      autoRemove: npGisAutoRemoveEnabled,
+      levels: npGisLevelsEnabled,
+    });
+  }
+
+  function setNpGisEnabled(enabled) {
+    npGisEnabled = !!enabled;
+    saveNpGisState();
+    if (npGisEnabled) {
+      setNpGisStatus('Scanning viewport…');
+      scheduleNpGisViewportUpdate();
+    } else {
+      setNpGisStatus('Disabled');
+    }
+  }
+
+  function setNpGisAutoRemoveEnabled(enabled) {
+    npGisAutoRemoveEnabled = !!enabled;
+    saveNpGisState();
+    if (npGisEnabled) scheduleNpGisViewportUpdate();
+  }
+
+  /** Ticking a level queues it for loading; unticking removes its layers immediately. */
+  async function setNpGisLevelEnabled(level, enabled) {
+    npGisLevelsEnabled[level] = !!enabled;
+    saveNpGisState();
+
+    if (!enabled) {
+      var names = Array.from(npGisActiveLayers.entries())
+        .filter(function (entry) {
+          return entry[1].level === level;
+        })
+        .map(function (entry) {
+          return entry[0];
+        });
+      for (var i = 0; i < names.length; i++) {
+        await removeNpGisLayer(names[i]);
+      }
+    }
+
+    if (npGisEnabled) scheduleNpGisViewportUpdate();
+    else if (!enabled) setNpGisStatus(NP_GIS_LEVEL_LABEL[level] + ' layers removed');
+  }
+
+  // Removes every Nepal GIS ward layer of this group (its own "Clear" button). Unlike
+  // the LMC card's clear, this deliberately leaves unrelated feature layers alone.
+  async function clearNpGisLayers() {
+    var names = Array.from(npGisActiveLayers.keys());
+    for (var i = 0; i < names.length; i++) {
+      await removeNpGisLayer(names[i]);
+    }
+    setNpGisStatus(names.length > 0 ? 'Cleared ' + names.length + ' layer(s)' : 'Nothing to clear');
     if (names.length > 0) {
       WazeToastr.Alerts.success(scriptName, 'Removed ' + names.length + ' layer(s)', false, false, 2000);
     }
@@ -1591,6 +2757,8 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       // the panel (and therefore before any layer) is built.
       await loadFeatureStyles();
       loadLmcAutoState();
+      loadNpGisState();
+      loadPostalState();
 
       WMSLayersTechSource.tileSizeG = new OL.Size(512, 512);
     WMSLayersTechSource.resolutions = [
@@ -2666,7 +3834,17 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     var tabs = npwTabs(panel, [
       { id: 'layers', label: 'Layers', title: 'Show / hide the WMS layer groups' },
       { id: 'shifting', label: 'Shifting', title: 'Shift a layer and adjust its opacity' },
-      { id: 'settings', label: 'Settings', title: 'Script settings' },
+      {
+        id: 'settings',
+        label: 'Settings',
+        title: 'Script settings',
+        // The label-field picker is built from the loaded layers, which change while
+        // panning, so it is refreshed whenever this tab becomes active instead of on
+        // every layer add/remove.
+        onShow: function () {
+          refreshLabelFieldControls(true);
+        },
+      },
     ]);
     var layersPane = tabs.panes.layers;
     var shiftingPane = tabs.panes.shifting;
@@ -2731,6 +3909,30 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       input.addEventListener('input', readout);
       return { input: input, valueEl: valueEl, readout: readout };
     }
+
+    // --- Label field ---------------------------------------------------------
+    // Which property - or ${attr} template - becomes the label. The property keys differ
+    // per layer, so the list is rebuilt from the features of the selected scope, and it
+    // can be set on ANY layer type, including those that are unlabelled by default.
+    styleCard.appendChild(npwCreate('span', 'npw-small-label', 'Label field:'));
+    var labelFieldSelect = document.createElement('select');
+    labelFieldSelect.id = 'npwStyleLabelField';
+    labelFieldSelect.className = 'npw-select';
+    labelFieldSelect.title =
+      'Pick a property to label the features with. Selecting one fills the box below, which stays editable so the value can be turned into a template.';
+    styleCard.appendChild(labelFieldSelect);
+
+    var labelTemplateInput = document.createElement('input');
+    labelTemplateInput.type = 'text';
+    labelTemplateInput.id = 'npwStyleLabelTemplate';
+    labelTemplateInput.className = 'npw-input';
+    labelTemplateInput.placeholder = 'Property name, or template: ${district} - ${gapa_napa}';
+    labelTemplateInput.title =
+      'A bare property name labels with that value. Use ${propertyName} to combine several, and \\n for a line break.';
+    styleCard.appendChild(labelTemplateInput);
+
+    var labelAttrList = npwCreate('div', 'npw-attr-list');
+    styleCard.appendChild(labelAttrList);
 
     // --- Stroke colour + label size ---
     var strokeRow = styleFieldRow('Stroke Color');
@@ -2868,6 +4070,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       style.labelPos = (horizontal || stylePosRadios.h[1]).value + (vertical || stylePosRadios.v[1]).value;
       var lineStyleRadio = styleLineStyleRadios.filter(function (radio) { return radio.checked; })[0];
       style.lineStyle = lineStyleRadio ? lineStyleRadio.value : FEATURE_STYLE_DEFAULTS.lineStyle;
+      style.labelField = currentLabelFieldValue();
       return style;
     }
 
@@ -2899,9 +4102,107 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       });
     }
 
+    /** The labelField value the two label controls currently describe. */
+    function currentLabelFieldValue() {
+      if (labelFieldSelect.value === LABEL_FIELD_NONE) return LABEL_FIELD_NONE;
+      return labelTemplateInput.value.trim() || LABEL_FIELD_BUILTIN;
+    }
+
+    // Property keys available in the selected scope, taken from the first feature of each
+    // layer. `__bbox` is our own windowing bookkeeping and `custom_label` is the built-in
+    // label, so neither is offered as a label source.
+    function labelFieldKeys() {
+      var layerName = styleScopeLayerName();
+      var keys = [];
+      var seen = {};
+      loadedGeoJSONLayers.forEach(function (info) {
+        if (layerName && info.name !== layerName) return;
+        var sample = info.sdkFeatures && info.sdkFeatures[0] && info.sdkFeatures[0].properties;
+        if (!sample) return;
+        Object.keys(sample).forEach(function (key) {
+          if (key === '__bbox' || key === 'custom_label' || seen[key]) return;
+          seen[key] = true;
+          keys.push(key);
+        });
+      });
+      keys.sort();
+      return keys;
+    }
+
+    /** Rebuilds the label-field select, the template box and the attribute list. */
+    function refreshLabelFieldControls(force) {
+      if (!labelFieldSelect) return; // the Style Settings card is not built yet
+      // Layer churn while panning would otherwise rebuild this on every add/remove, even
+      // with the Settings tab closed. `force` is used by the tab's onShow hook and after
+      // a publish, i.e. whenever somebody is actually looking at it.
+      if (!force && settingsPane && settingsPane.hidden) return;
+
+      var layerName = styleScopeLayerName();
+      var current = rawStyleValues(layerName).labelField || '';
+      var keys = labelFieldKeys();
+
+      labelFieldSelect.innerHTML = '';
+      var addOption = function (value, text) {
+        var el = document.createElement('option');
+        el.value = value;
+        el.textContent = text;
+        labelFieldSelect.appendChild(el);
+      };
+      addOption(LABEL_FIELD_BUILTIN, 'Built-in (layer default)');
+      keys.forEach(function (key) {
+        addOption(key, key);
+      });
+      addOption(LABEL_FIELD_NONE, '\u2014 No label \u2014');
+      // Only shown when the saved value is not one of the options above, i.e. a template.
+      if (current && current !== LABEL_FIELD_NONE && keys.indexOf(current) === -1) {
+        addOption(LABEL_FIELD_CUSTOM, 'Custom template');
+      }
+
+      if (current === LABEL_FIELD_NONE) labelFieldSelect.value = LABEL_FIELD_NONE;
+      else if (!current) labelFieldSelect.value = LABEL_FIELD_BUILTIN;
+      else if (keys.indexOf(current) !== -1) labelFieldSelect.value = current;
+      else labelFieldSelect.value = LABEL_FIELD_CUSTOM;
+
+      labelTemplateInput.value = current === LABEL_FIELD_NONE ? '' : current;
+      labelTemplateInput.disabled = current === LABEL_FIELD_NONE;
+      labelFieldSelect.disabled = loadedGeoJSONLayers.length === 0;
+
+      // The read-only attribute list is what makes the picker usable on the municipality
+      // KML, whose ArcGIS names (GAPA_NAP_2, GN_TYPE_13) are otherwise pure guesswork.
+      labelAttrList.innerHTML = '';
+      var sampleInfo = layerName ? findGeoJsonLayer(layerName) : loadedGeoJSONLayers[0];
+      var sampleProps =
+        sampleInfo && sampleInfo.sdkFeatures && sampleInfo.sdkFeatures[0] && sampleInfo.sdkFeatures[0].properties;
+      if (!sampleProps) {
+        labelAttrList.appendChild(npwCreate('div', 'npw-attr-empty', 'No layer loaded yet.'));
+        return;
+      }
+      Object.keys(sampleProps).forEach(function (key) {
+        if (key === '__bbox') return;
+        var row = npwCreate('div', 'npw-attr-row');
+        row.appendChild(npwCreate('span', 'npw-attr-key', key));
+        row.appendChild(npwCreate('span', 'npw-attr-value', npwAttrPreview(sampleProps[key])));
+        labelAttrList.appendChild(row);
+      });
+    }
+
+    /** Saves a labelField into the current scope and re-syncs the controls. */
+    function publishLabelField(value) {
+      var style = readStyleControls();
+      style.labelField = value;
+      var layerName = styleScopeLayerName();
+      if (layerName) saveLayerFeatureStyle(layerName, style);
+      else saveGlobalFeatureStyle(style);
+      refreshLabelFieldControls(true);
+      styleCardStatus.textContent = layerName
+        ? 'Label field saved for ' + layerName + '.'
+        : 'Label field saved for the global style.';
+    }
+
     function loadStyleScope() {
       var layerName = styleScopeLayerName();
       populateStyleControls(rawStyleValues(layerName));
+      refreshLabelFieldControls();
       styleResetLayerBtn.disabled = !layerName;
       styleCardStatus.textContent = layerName
         ? 'Editing the override for ' + layerName + '.'
@@ -2944,6 +4245,24 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       });
 
     styleScopeSelect.addEventListener('change', loadStyleScope);
+
+    // Selecting a property fills the template box rather than replacing it, so the value
+    // stays editable and "${district} - ${gapa_napa}" can be typed on top of a pick.
+    labelFieldSelect.addEventListener('change', function () {
+      var value = labelFieldSelect.value;
+      if (value === LABEL_FIELD_CUSTOM) {
+        labelTemplateInput.focus(); // display-only state - nothing to publish
+        return;
+      }
+      labelTemplateInput.value =
+        value === LABEL_FIELD_BUILTIN || value === LABEL_FIELD_NONE ? '' : value;
+      labelTemplateInput.disabled = value === LABEL_FIELD_NONE;
+      publishLabelField(value);
+    });
+    labelTemplateInput.addEventListener('change', function () {
+      publishLabelField(labelTemplateInput.value.trim() || LABEL_FIELD_BUILTIN);
+    });
+
     styleResetGlobalBtn.addEventListener('click', function () {
       clearGlobalFeatureStyle();
       loadStyleScope();
@@ -2959,6 +4278,40 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 
     fillStyleScopeSelect();
     loadStyleScope();
+
+    // --- Settings tab: Postal Codes (Google Sheet -> ward features) ----------
+    buildPostalCard(settingsPane, function () {
+      refreshLabelFieldControls(true);
+    });
+
+    // --- Postal code in the feature edit panel ---------------------------------
+    // wme-feature-editor-opened is the PRIMARY trigger: it fires when the panel opens and
+    // names the feature type, so a feature is handled as soon as its panel appears (and an
+    // unrelated panel drops a card left over from the previous selection).
+    //
+    // Segments AND venues are handled. Google places are NOT: the address Google carries is
+    // often wrong (see postalUpdateAddressCard) and there is no reliable way to know whether
+    // the one on screen belongs to the ward the place sits in, so no card is shown for them.
+    wmeSDK.Events.on({
+      eventName: 'wme-feature-editor-opened',
+      eventHandler: function (evt) {
+        if (evt && (evt.featureType === 'segment' || evt.featureType === 'venue')) {
+          postalScheduleAddressCard(80);
+        } else {
+          postalRemoveAddressCard();
+        }
+      },
+    });
+    // wme-selection-changed stays as the fallback: it also covers a selection change made
+    // while the panel is ALREADY open, which does not re-open it. The first pass catches a
+    // segment that was selected before the script finished loading.
+    wmeSDK.Events.on({
+      eventName: 'wme-selection-changed',
+      eventHandler: function () {
+        postalScheduleAddressCard();
+      },
+    });
+    postalScheduleAddressCard(400);
 
     // One card per layer group, with the per-layer checkboxes.
     buildLayerCategoryPanels(layersPane);
@@ -3316,6 +4669,122 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         clearLmcViewportLayers();
       });
 
+    // --- "Nepal GIS Layers" - hierarchy viewport auto-loader ------------------
+    // Same viewport model as the LMC ward card above, but the areas are discovered
+    // from the published WME-Nepal-GIS-Layers manifests and outlines, so the coverage
+    // is national and multilevel instead of a fixed ward list.
+    var npGisCard = npwCard(layersPane, 'Nepal GIS Layers', {
+      collapsible: true,
+      storageKey: 'nepal-gis-layers',
+    });
+    npGisCard.id = 'NpGisGroup';
+    var npGisBody = npGisCard.npwBody;
+
+    npGisBody.appendChild(
+      npwCreate(
+        'div',
+        'npw-status',
+        'Loads the hierarchy inside the map view: dissolved province and district outlines, plus the municipality and ward polygons of every local unit, each from its own KML. Every level has its own zoom gate - tick a level to load it, and zoom in until it appears.'
+      )
+    );
+
+    // Master switch for the whole group.
+    var npGisMasterRow = npwCreate('div', 'npw-layer-item');
+    var npGisMasterCheckbox = document.createElement('input');
+    npGisMasterCheckbox.type = 'checkbox';
+    npGisMasterCheckbox.className = 'npw-checkbox';
+    npGisMasterCheckbox.id = 'npGisAutoToggle';
+    npGisMasterCheckbox.checked = npGisEnabled;
+    var npGisMasterLabel = npwCreate('label', 'npw-label', 'Auto-load layers in view');
+    npGisMasterLabel.title =
+      'Download and show every ticked level whose bounding box intersects the current viewport';
+    npGisMasterLabel.addEventListener('click', function () {
+      npGisMasterCheckbox.checked = !npGisMasterCheckbox.checked;
+      npGisMasterCheckbox.dispatchEvent(new Event('change'));
+    });
+    npGisMasterRow.appendChild(npGisMasterCheckbox);
+    npGisMasterRow.appendChild(npGisMasterLabel);
+    npGisBody.appendChild(npGisMasterRow);
+
+    // Hierarchy levels, drawn bottom -> top. The colour dot mirrors the per-level stroke
+    // colour so the map is readable without hovering. Ward is the only level ticked by
+    // default: the three outline levels are wide fills that would hide the map unasked.
+    npGisBody.appendChild(npwCreate('span', 'npw-small-label', 'Levels:'));
+    var npGisLevelRow = npwCreate('div', 'npw-level-row');
+    var npGisLevelSource = {
+      province: 'one dissolved outline per province',
+      district: 'one dissolved outline per district',
+      municipality: 'one polygon per local unit, each from its own KML',
+      ward: 'one polygon per ward, labelled with the ward name the KML carries',
+    };
+    NP_GIS_LEVELS.forEach(function (level) {
+      var levelStyle = NP_GIS_LEVEL_STYLE[level] || {};
+      var levelItem = npwCreate('label', 'npw-level-item');
+      levelItem.title =
+        NP_GIS_LEVEL_LABEL[level] +
+        ' — ' +
+        (npGisLevelSource[level] || '') +
+        '. Drawn in ' +
+        (levelStyle.color || 'the Style Settings colour') +
+        ', loaded from zoom ' +
+        NP_GIS_LEVEL_MIN_ZOOM[level] +
+        '+ (below that its layers are dropped again). Default label: ' +
+        (NP_GIS_LEVEL_DEFAULT_LABEL[level] || 'the ward name the KML carries');
+      var levelDot = npwCreate('span', 'npw-level-dot');
+      levelDot.style.backgroundColor = levelStyle.color || 'transparent';
+      var levelCheckbox = document.createElement('input');
+      levelCheckbox.type = 'checkbox';
+      levelCheckbox.className = 'npw-checkbox';
+      levelCheckbox.id = 'npGisLevel' + level.charAt(0).toUpperCase() + level.slice(1);
+      levelCheckbox.checked = !!npGisLevelsEnabled[level];
+      levelCheckbox.addEventListener('change', function () {
+        setNpGisLevelEnabled(level, levelCheckbox.checked);
+      });
+      levelItem.appendChild(levelCheckbox);
+      levelItem.appendChild(levelDot);
+      levelItem.appendChild(npwCreate('span', 'npw-level-text', NP_GIS_LEVEL_LABEL[level]));
+      npGisLevelRow.appendChild(levelItem);
+    });
+    npGisBody.appendChild(npGisLevelRow);
+
+    // Off-screen cleanup toggle.
+    var npGisRemoveRow = npwCreate('div', 'npw-layer-item');
+    var npGisRemoveCheckbox = document.createElement('input');
+    npGisRemoveCheckbox.type = 'checkbox';
+    npGisRemoveCheckbox.className = 'npw-checkbox';
+    npGisRemoveCheckbox.id = 'npGisAutoRemove';
+    npGisRemoveCheckbox.checked = npGisAutoRemoveEnabled;
+    var npGisRemoveLabel = npwCreate('label', 'npw-label', 'Auto-remove off-screen layers');
+    npGisRemoveLabel.title =
+      'Remove an auto-loaded ward once it is ' +
+      Math.round(NP_GIS_EVICT_PADDING * 100) +
+      '% of a viewport clear of the edges, after a ' +
+      Math.round(NP_GIS_EVICT_GRACE_MS / 1000) +
+      ' s grace period';
+    npGisRemoveLabel.addEventListener('click', function () {
+      npGisRemoveCheckbox.checked = !npGisRemoveCheckbox.checked;
+      npGisRemoveCheckbox.dispatchEvent(new Event('change'));
+    });
+    npGisRemoveRow.appendChild(npGisRemoveCheckbox);
+    npGisRemoveRow.appendChild(npGisRemoveLabel);
+    npGisBody.appendChild(npGisRemoveRow);
+
+    npGisMasterCheckbox.addEventListener('change', function () {
+      setNpGisEnabled(npGisMasterCheckbox.checked);
+    });
+    npGisRemoveCheckbox.addEventListener('change', function () {
+      setNpGisAutoRemoveEnabled(npGisRemoveCheckbox.checked);
+    });
+
+    var npGisStatus = npwCreate('div', 'npw-status', npGisEnabled ? 'Waiting for map…' : 'Disabled');
+    npGisStatus.id = 'npGisStatus';
+    npGisBody.appendChild(npGisStatus);
+
+    npwButton(npGisBody, 'Clear Nepal GIS wards', 'Remove every automatically loaded Nepal GIS ward layer', 'danger')
+      .addEventListener('click', function () {
+        clearNpGisLayers();
+      });
+
     fillWMSLayersSelectList();
     syncOpacityControlToSelection();
     refreshWmsShiftStatus();
@@ -3354,10 +4823,13 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       eventName: 'wme-map-move-end',
       eventHandler: function () {
         setZOrdering(WMSLayerTogglers)();
-        // Panning/zooming changes which wards are in view for the auto-loader and which
+        // Panning/zooming changes which wards are in view for the auto-loaders and which
         // features belong on the layers for the view window.
         scheduleLmcViewportUpdate();
+        scheduleNpGisViewportUpdate();
         scheduleFeatureWindowUpdate();
+        // ...and which ward the selected segment now sits in.
+        postalScheduleAddressCard();
       },
     });
   }
@@ -3440,6 +4912,21 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     }
   }
 
+  // Fetches one plain-HTTP tile through GM_xmlhttpRequest and hands back a blob: URL.
+  //
+  // Callback-based, not a promise, because its caller is OpenLayers' own renderTile path
+  // (getURLasync), which expects a node-style callback.
+  //
+  // REQUESTS ARE DE-DUPLICATED per URL. A tile grid asks for the same tile from several code
+  // paths, and the pending queue holds every callback until the single in-flight request
+  // settles - then they all get the same blob URL (or the same error). A tile already in the
+  // cache is answered synchronously. Every callback is invoked in its own try/catch, so one
+  // bad consumer cannot strand the others.
+  //
+  // `error` is non-null only on failure; on success the URL is passed as the first argument.
+  //
+  // @param {string} url the http:// tile URL
+  // @param {Function} callback callback(blobUrl, error)
   function fetchHttpTile(url, callback) {
     if (httpTileBlobCache[url]) {
       callback(httpTileBlobCache[url], null);
@@ -3741,6 +5228,29 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       '.npw-ward-item { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 10px; color: var(--content_p1, #333); cursor: pointer; user-select: none; }',
       '.npw-ward-item > input.npw-checkbox { flex: 0 0 auto; width: 13px !important; height: 13px !important; min-width: 13px; margin: 0 !important; padding: 0 !important; cursor: pointer; accent-color: var(--primary, #DC143C); }',
       '.npw-ward-text { line-height: 1.3; }',
+      // Hierarchy-level row of the "Nepal GIS Layers" card. Same native-control gotcha as
+      // the ward grid, so the checkbox is targeted as a compound selector.
+      '.npw-level-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 4px 0 6px; }',
+      '.npw-level-item { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 10px; color: var(--content_p1, #333); cursor: pointer; user-select: none; white-space: nowrap; }',
+      '.npw-level-item > input.npw-checkbox { flex: 0 0 auto; width: 13px !important; height: 13px !important; min-width: 13px; margin: 0 !important; padding: 0 !important; cursor: pointer; accent-color: var(--primary, #DC143C); }',
+      '.npw-level-dot { flex: 0 0 auto; box-sizing: border-box; width: 8px; height: 8px; border: 1px solid rgba(0, 0, 0, 0.35); border-radius: 2px; }',
+      '.npw-level-text { line-height: 1.3; }',
+      // Attribute list of the Style Settings label-field picker.
+      '.npw-attr-list { max-height: 132px; overflow-y: auto; margin: 2px 0 6px; padding: 3px 5px; border: 1px solid var(--hairline, #ccc); border-radius: 4px; background: rgba(127, 127, 127, 0.07); font-size: 10px; }',
+      '.npw-attr-row { display: flex; gap: 6px; padding: 1px 0; }',
+      '.npw-attr-key { flex: 0 0 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--content_p1, #333); }',
+      '.npw-attr-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--content_p2, #666); }',
+      '.npw-attr-empty { font-style: italic; color: var(--content_p2, #666); }',
+      // Postal address card inside WME's segment edit panel. Unscoped on purpose: it is
+      // injected into WME's panel, not into our own .npw-panel.
+      '.npw-address-card { box-sizing: border-box; margin: 6px 0; padding: 3px 6px; border: 1px solid var(--hairline, #ccc); border-left: 3px solid var(--primary, #DC143C); border-radius: 4px; background: rgba(220, 20, 60, 0.05); font-family: inherit; font-size: 11px; line-height: 1.35; color: var(--content_default, #333); }',
+      '.npw-address-row { display: flex; align-items: center; gap: 6px; }',
+      '.npw-address-icon { flex: 0 0 auto; display: inline-flex; align-items: center; color: var(--primary, #DC143C); }',
+      '.npw-address-icon > svg { display: block; }',
+      '.npw-address-value { flex: 1 1 auto; min-width: 0; font-weight: 600; word-break: break-word; }',
+      // Beats ".npw-btn { width: 100% }" on specificity, so no !important is needed.
+      '.npw-address-row > button.npw-address-copy { flex: 0 0 auto; width: auto; min-width: 0; padding: 1px 7px; margin: 0; border-radius: 3px; font-size: 9px; font-weight: 600; line-height: 1.6; }',
+      '.npw-address-warn { margin-top: 2px; font-size: 9px; line-height: 1.3; color: #b26a00; }',
       '.npw-split { display: flex; gap: 8px; }',
       '.npw-split > div { flex: 1; }',
     ].join('\n');
@@ -3758,19 +5268,11 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   // Remembered sub-tab (Layers / Shifting / Settings), so reopening WME returns the
   // user to the tab they were on.
   function loadSubTab() {
-    try {
-      return localStorage.getItem(WMS_SUBTAB_STORAGE_KEY);
-    } catch (e) {
-      return null;
-    }
+    return npwLoadString(WMS_SUBTAB_STORAGE_KEY, null);
   }
 
   function saveSubTab(id) {
-    try {
-      localStorage.setItem(WMS_SUBTAB_STORAGE_KEY, id);
-    } catch (e) {
-      // Ignore - a failed preference write must never break the script.
-    }
+    npwSaveString(WMS_SUBTAB_STORAGE_KEY, id);
   }
 
   // Sub-tab bar (the segmented control below the panel header). Each entry of `tabs`
@@ -3791,6 +5293,15 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
         buttons[tab.id].classList.toggle('npw-tab-active', isActive);
         buttons[tab.id].setAttribute('aria-selected', isActive ? 'true' : 'false');
         buttons[tab.id].tabIndex = isActive ? 0 : -1;
+        // Optional per-tab hook, used by a pane whose content is built from state that
+        // changes behind its back (see the Settings tab's label-field picker).
+        if (isActive && typeof tab.onShow === 'function') {
+          try {
+            tab.onShow();
+          } catch (e) {
+            console.warn(scriptName + ': tab onShow hook failed for ' + tab.id, e);
+          }
+        }
       });
       saveSubTab(id);
     };
@@ -3830,22 +5341,12 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   // new card only needs a storageKey (a layer group name today, a provider section -
   // Django, ... - tomorrow).
   function loadCollapsedState(storageKey) {
-    try {
-      var all = JSON.parse(localStorage.getItem(WMS_COLLAPSED_STORAGE_KEY) || '{}');
-      return typeof all[storageKey] === 'boolean' ? all[storageKey] : null;
-    } catch (e) {
-      return null;
-    }
+    var stored = npwLoadEntry(WMS_COLLAPSED_STORAGE_KEY, storageKey, null);
+    return typeof stored === 'boolean' ? stored : null;
   }
 
   function saveCollapsedState(storageKey, collapsed) {
-    try {
-      var all = JSON.parse(localStorage.getItem(WMS_COLLAPSED_STORAGE_KEY) || '{}');
-      all[storageKey] = collapsed;
-      localStorage.setItem(WMS_COLLAPSED_STORAGE_KEY, JSON.stringify(all));
-    } catch (e) {
-      // Ignore - a failed preference write must never break the script.
-    }
+    npwSaveEntry(WMS_COLLAPSED_STORAGE_KEY, storageKey, collapsed);
   }
 
   // A card is the panel's building block: an optional uppercase title bar plus a
@@ -3964,59 +5465,35 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   }
 
   /* --------------------- master toggle + opacity storage -------------------- */
+  // Stored as a bare string, defaulting to ON: only an explicit 'false' turns it off,
+  // so a missing or unreadable entry keeps the layers visible.
   function loadMasterToggleState() {
-    try {
-      return localStorage.getItem(WMS_MASTER_STORAGE_KEY) !== 'false';
-    } catch (e) {
-      return true;
-    }
+    return npwLoadString(WMS_MASTER_STORAGE_KEY, null) !== 'false';
   }
 
   function saveMasterToggleState(state) {
-    try {
-      localStorage.setItem(WMS_MASTER_STORAGE_KEY, state ? 'true' : 'false');
-    } catch (e) {
-      // Ignore - a failed preference write must never break the script.
-    }
+    npwSaveString(WMS_MASTER_STORAGE_KEY, state ? 'true' : 'false');
   }
 
   function loadCategoryOpacity(category) {
-    try {
-      var all = JSON.parse(localStorage.getItem(WMS_CATEGORY_OPACITY_STORAGE_KEY) || '{}');
-      return typeof all[category] === 'number' ? all[category] : null;
-    } catch (e) {
-      return null;
-    }
+    var stored = npwLoadEntry(WMS_CATEGORY_OPACITY_STORAGE_KEY, category, null);
+    return typeof stored === 'number' ? stored : null;
   }
 
   function saveCategoryOpacity(category, opacity) {
-    try {
-      var all = JSON.parse(localStorage.getItem(WMS_CATEGORY_OPACITY_STORAGE_KEY) || '{}');
-      all[category] = opacity;
-      localStorage.setItem(WMS_CATEGORY_OPACITY_STORAGE_KEY, JSON.stringify(all));
-    } catch (e) {
-      // Ignore - see above.
-    }
+    npwSaveEntry(WMS_CATEGORY_OPACITY_STORAGE_KEY, category, opacity);
   }
 
   // Per-layer WMS shifts the user nudged into place with the pad. Kept in metres of
   // content movement ({ east, north }), so the values do not depend on the map
   // projection and one can be copied straight into WMS_LAYER_SHIFT_PRESETS.
   function loadStoredLayerOffsets() {
-    try {
-      var all = JSON.parse(localStorage.getItem(WMS_LAYER_OFFSETS_STORAGE_KEY) || '{}');
-      return all && typeof all === 'object' ? all : {};
-    } catch (e) {
-      return {};
-    }
+    var all = npwLoadJson(WMS_LAYER_OFFSETS_STORAGE_KEY, {});
+    return all && typeof all === 'object' ? all : {};
   }
 
   function saveStoredLayerOffsets(all) {
-    try {
-      localStorage.setItem(WMS_LAYER_OFFSETS_STORAGE_KEY, JSON.stringify(all));
-    } catch (e) {
-      // Ignore - a failed preference write must never break the script.
-    }
+    npwSaveJson(WMS_LAYER_OFFSETS_STORAGE_KEY, all);
   }
 
   // Register the single master checkbox that owns every layer of the script.
@@ -4053,6 +5530,10 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       }
       if (visible) {
         if (!isOnMap) W.map.addLayer(layer);
+        // Opacity before showing: a newly attached OL2 layer carries its default (1.0), and
+        // adding it is what makes the group's remembered opacity apply again after a refresh.
+        // Set here rather than after setVisibility so the first painted tile is already correct.
+        applyStoredCategoryOpacity(toggler);
         layer.setVisibility(true);
       } else {
         layer.setVisibility(false);
@@ -4067,6 +5548,30 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     }
   }
 
+  // Re-applies a toggler's remembered category opacity to its layers.
+  // The slider writes the value on input and to localStorage, but that is all it used to do -
+  // nothing read the stored value back onto the layers, so after a page refresh every layer
+  // came back at OL2's default opacity while the slider still showed the saved position. This
+  // is the missing half: it runs when a layer is attached and when the slider moves.
+  // The storage key is the toggler's own `groupName`, which is exactly what the card's slider
+  // is keyed by (buildLayerCategoryPanels groups by the same field).
+  // A group with no stored value is left alone rather than forced to 1, so a layer whose own
+  // opacity is set elsewhere (the Style Settings card) is not overridden by a default here.
+  function applyStoredCategoryOpacity(toggler) {
+    var group = toggler && toggler.groupName;
+    if (!group) return;
+    var opacity = loadCategoryOpacity(group);
+    if (opacity === null) return;
+    setTogglerOpacity(toggler, opacity);
+  }
+
+  /** Sets one opacity on every layer of a toggler that supports it. */
+  function setTogglerOpacity(toggler, opacity) {
+    toggler.layerArray.forEach(function (item) {
+      if (item.layer && typeof item.layer.setOpacity === 'function') item.layer.setOpacity(opacity);
+    });
+  }
+
   // A layer is visible only when its sidebar checkbox is ticked AND the master
   // checkbox of the script in WME's layer switcher is on.
   function syncTogglerVisibility(toggler) {
@@ -4077,13 +5582,14 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     for (var key in WMSLayerTogglers) syncTogglerVisibility(WMSLayerTogglers[key]);
   }
 
-  // State is persisted under the existing localStorage.WMSLayers key, so preferences
-  // saved by the previous implementations are picked up unchanged.
+  // State is persisted under the pre-existing "WMSLayers" key, so preferences saved by
+  // earlier implementations are picked up unchanged. Its two callers keep their own
+  // console.warn: a lost layer selection is worth surfacing, unlike a lost panel toggle.
   function saveLayerTogglerStates() {
     var state = {};
     for (var key in WMSLayerTogglers) state[key] = !!WMSLayerTogglers[key].tabChecked;
     try {
-      localStorage.WMSLayers = JSON.stringify(state);
+      localStorage.setItem('WMSLayers', JSON.stringify(state));
     } catch (e) {
       console.warn(scriptName + ': could not save layer toggler states', e);
     }
@@ -4097,12 +5603,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   // Only loads the saved state into the togglers; the checkboxes and the layer
   // visibility are applied once the sidebar tab exists (see buildLayerCategoryPanels).
   function restoreLayerTogglerStates() {
-    var state;
-    try {
-      state = JSON.parse(localStorage.WMSLayers || 'null');
-    } catch (e) {
-      return;
-    }
+    var state = npwLoadJson('WMSLayers', null);
     if (!state) return;
     for (var key in state) {
       var toggler = WMSLayerTogglers[key];
@@ -4167,14 +5668,18 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       }
       slider.value = String(opacity);
       var valueLabel = npwCreate('span', 'npw-opacity-value', Math.round(opacity * 100) + '%');
+      // The stored value is pushed onto the layers as the card is built too, so a layer that
+      // was attached before this card existed (an auto-loaded group, or a layer restored on
+      // start-up) picks it up rather than keeping OL2's default.
+      groupTogglers.forEach(function (tg) {
+        setTogglerOpacity(tg, opacity);
+      });
       slider.addEventListener('input', function () {
         var newOpacity = parseFloat(slider.value);
         valueLabel.textContent = Math.round(newOpacity * 100) + '%';
         saveCategoryOpacity(group, newOpacity);
         groupTogglers.forEach(function (tg) {
-          tg.layerArray.forEach(function (item) {
-            if (item.layer && typeof item.layer.setOpacity === 'function') item.layer.setOpacity(newOpacity);
-          });
+          setTogglerOpacity(tg, newOpacity);
         });
       });
       opacityRow.appendChild(slider);
@@ -4250,6 +5755,15 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     };
   }
 
+  // Builds the re-z-indexing pass for a set of togglers.
+  //
+  // Returns a FUNCTION rather than applying the z-indices itself, because the pass has to be
+  // re-run every time a layer is added to or removed from the map (an OL2 layer re-added by
+  // WME loses its z-index). The two call sites hand the result straight to the event handler.
+  // Only layers with a positive zIndex are touched, so the base-zIndex layers are left alone.
+  //
+  // @param {Object} layerTogglers key -> toggler, normally WMSLayerTogglers
+  // @returns {Function} the pass to run, taking no arguments
   function setZOrdering(layerTogglers) {
     return function () {
       for (var key in layerTogglers) {
@@ -4265,6 +5779,19 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     };
   }
 
+  // OpenLayers 2 OVERRIDE - not called by anything in this script.
+  //
+  // WMS layers created with service type 'WMS_4326' are given getURL / getFullRequestString
+  // replacements in their options, and OL2 calls both with `this` bound to the layer. That is
+  // why they read `this.projection` / `this.epsg4326` below - those are OL2's own layer
+  // properties, set from the options object of addNewLayer().
+  //
+  // The WMS 1.1.1 axis order is longitude,latitude, so the bounds are transformed FROM the
+  // map projection INTO EPSG:4326 with reverseAxisOrder() - the mirror of what the default
+  // getURL() does. Do not "simplify" the transform away.
+  //
+  // @param {OpenLayers.Bounds} bounds the tile bounds in the map projection
+  // @returns {string} the full GetMap request URL
   function getUrl4326(bounds) {
     var newParams = {};
     bounds.transform(this.projection, this.epsg4326);
@@ -4281,6 +5808,16 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     return requestString;
   }
 
+  // OpenLayers 2 OVERRIDE - the companion of getUrl4326 above, with the same `this = layer`
+  // calling convention.
+  //
+  // Forces SRS (not CRS - this is a WMS 1.1.1 request, see the version in addNewLayer) onto the
+  // params before delegating to OL2, so the request string is built for the projection the
+  // transformed bounds are already in. Setting it here rather than in the layer params is
+  // deliberate: OL2's own getFullRequestString would otherwise stamp the map's projection on.
+  //
+  // @param {Object} newParams the request parameters, including BBOX / WIDTH / HEIGHT
+  // @returns {string} the full request URL, via OL2's grid implementation
   function getFullRequestString4326(newParams) {
     this.params.SRS = 'EPSG:4326';
     return OL.Layer.Grid.prototype.getFullRequestString.apply(this, arguments);
@@ -4300,6 +5837,1323 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     return coords.map(removeZCoordinates);
   }
 
+  /* ==================================================================
+     POSTAL CODES - Nepal government address sheet -> feature properties
+     The published Google Sheet is fetched once (gviz JSON), cached in the same
+     IndexedDB the styles use, and joined to the loaded ward polygons by
+     State Code + District + GaPa/NaPa. The join is driven by the WARD KML's own
+     properties - never by the Waze city name, which is only ever used for
+     checking/display. The 5-digit city code comes straight from the sheet; the
+     7-digit ward code is DERIVED from it plus the ward number (10106 + ward 1
+     -> 1010601), which is the sheet's own convention (its "Ward Postal Codes"
+     cell reads "1010601 to 11").
+     ================================================================== */
+  var POSTAL_SHEET_ID = '1vY1a2UU9X1j9EJTyBk4Rsg5RgrzDjYgUomETge7vLQI';
+  var POSTAL_SHEET_URL =
+    'https://docs.google.com/spreadsheets/d/' + POSTAL_SHEET_ID + '/gviz/tq?tqx=out:json';
+  var POSTAL_DB_KEY = 'postal-codes'; // record key inside the shared styles store
+  var POSTAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  var POSTAL_STATE_KEY = '_wme_nepali_wms_postal';
+
+  // Column positions A..O of the sheet. Columns P..Z are unnamed and empty, so they are
+  // deliberately not mapped: a label-keyed map would collapse all eleven into a single
+  // '' key. These are gviz column ids, so a renamed header does not break us.
+  var POSTAL_COLUMNS = {
+    sn: 0,
+    stateCode: 1,
+    province: 2,
+    district: 3,
+    typeGnEn: 4,
+    typeRect: 5,
+    typeGn: 6,
+    gapaNapa: 7,
+    wazeCity: 8,
+    cityName: 9,
+    cityPostal: 10,
+    wardCount: 11,
+    wardPostalRange: 12,
+    postalOffice: 13,
+    remarks: 14,
+  };
+
+  // Province names, keyed on BOTH spellings the data uses: the two-letter state token the
+  // ward KML carries inside its address ("Bhaktapur-9, BHAKTAPUR, BA") and the numeric
+  // State Code the sheet uses (1-7). One map, so a name can never differ between the two
+  // sources that derive it.
+  var POSTAL_STATE_NAMES = {
+    KO: 'Koshi',
+    MA: 'Madhesh',
+    BA: 'Bagmati',
+    GA: 'Gandaki',
+    LU: 'Lumbini',
+    KA: 'Karnali',
+    SU: 'Sudurpashchim',
+    '1': 'Koshi',
+    '2': 'Madhesh',
+    '3': 'Bagmati',
+    '4': 'Gandaki',
+    '5': 'Lumbini',
+    '6': 'Karnali',
+    '7': 'Sudurpashchim',
+  };
+
+  var postalRows = null; // parsed sheet rows
+  var postalIndex = null; // { byKey: Map, byUnit: Map }
+  var postalLoaded = false;
+  var postalFetchedAt = 0;
+  var postalStatus = 'idle'; // idle | loading | ready | error
+  var postalMessage = ''; // transient note, e.g. "stale cache"
+  var postalError = '';
+  var postalWardCodes = true; // 7-digit ward code vs 5-digit city code
+  var postalAutoLoad = true;
+  // Put the Waze city in front of the ward part of the card's address. On by default:
+  // the sheet's Waze City Name column holds the sub-city / area / tole, so without it
+  // the copied address is missing the one part a local reader uses to find the place.
+  var postalSubCity = true;
+  // Write "Bagmati Province" rather than a bare "Bagmati". On by default and switchable,
+  // the same way the sub-city insert is, so an address can be written either way.
+  var postalProvinceSuffix = true;
+  var postalLoadPromise = null;
+  var postalUiRefreshers = []; // the Settings card re-renders itself through these
+
+  function postalNotifyUi() {
+    postalUiRefreshers.forEach(function (fn) {
+      try {
+        fn();
+      } catch (e) {
+        console.warn(scriptName + ': postal UI refresh failed', e);
+      }
+    });
+  }
+
+  function postalSetStatus(status, message, error) {
+    postalStatus = status;
+    postalMessage = message || '';
+    postalError = error || '';
+    postalNotifyUi();
+  }
+
+  function postalStatusText() {
+    if (postalStatus === 'loading') return 'Loading the postal code sheet...';
+    if (postalStatus === 'error') return 'Could not load the sheet: ' + (postalError || 'unknown error');
+    if (postalLoaded && postalRows) {
+      var parts = [postalRows.length + ' rows indexed'];
+      if (postalFetchedAt) {
+        var mins = Math.round((Date.now() - postalFetchedAt) / 60000);
+        parts.push(mins <= 0 ? 'fetched just now' : 'cached ' + mins + ' min ago');
+      }
+      if (postalMessage) parts.push(postalMessage);
+      return parts.join(' - ') + '.';
+    }
+    return 'Not loaded yet.';
+  }
+
+  function postalCellValue(cell) {
+    if (!cell) return '';
+    if (cell.v === null || cell.v === undefined) {
+      return cell.f === null || cell.f === undefined ? '' : String(cell.f);
+    }
+    return cell.v;
+  }
+
+  // Unwraps the gviz wrapper (an "O_o" marker line followed by
+  // google.visualization.Query.setResponse({...});) and maps the columns positionally.
+  function postalParseGviz(text) {
+    var body = String(text);
+    var start = body.indexOf('{');
+    var end = body.lastIndexOf('}');
+    if (start < 0 || end <= start) throw new Error('unexpected gviz response');
+    var payload = JSON.parse(body.slice(start, end + 1));
+    var table = payload && payload.table;
+    if (!table || !Array.isArray(table.rows)) throw new Error('gviz response has no table');
+    var rows = [];
+    table.rows.forEach(function (row) {
+      var cells = row && row.c;
+      if (!Array.isArray(cells)) return;
+      var record = {};
+      Object.keys(POSTAL_COLUMNS).forEach(function (name) {
+        record[name] = postalCellValue(cells[POSTAL_COLUMNS[name]]);
+      });
+      // A trailing blank line (or a spacer row) carries neither of the two join keys.
+      if (!String(record.district || '').trim() && !String(record.gapaNapa || '').trim()) return;
+      rows.push(record);
+    });
+    if (!rows.length) throw new Error('the sheet returned no usable rows');
+    return rows;
+  }
+
+  // Waze city names: exact match only (no transliteration), so whitespace and Unicode
+  // form are the only things normalised - applied to BOTH sides of the compare.
+  function postalNormalizeWazeName(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/\s+/g, ' ').trim().normalize('NFC');
+  }
+
+  // Upper-cased join part. State Code arrives as a number (1..7), so String() first;
+  // upper-casing is safe here because these are ASCII values and it only absorbs case
+  // drift - it never guesses at a spelling.
+  function postalSlugPart(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).trim().toUpperCase();
+  }
+
+  /** Full province name for a state code - the two-letter token or the numeric code. */
+  function postalStateName(value) {
+    if (value === null || value === undefined) return '';
+    var key = postalSlugPart(value);
+    return POSTAL_STATE_NAMES[key] || '';
+  }
+
+  // The province a ward polygon belongs to: the KML's numeric state code first, then the
+  // two-letter token its address ends with. '' when neither is known.
+  function postalStateNameOf(properties) {
+    if (!properties) return '';
+    var mapped =
+      postalStateName(properties.ex_state_code) || postalStateName(properties.ex_PROVINCE_2);
+    if (mapped) return mapped;
+    var address = properties[NP_GIS_LABEL_FIELD];
+    if (!address) return '';
+    var parts = String(address).split(',');
+    return postalStateName(parts[parts.length - 1]);
+  }
+
+  // Punctuation- and space-free form: "Bhaktapur Nagarpalika" -> "BHAKTAPURNAGARPALIKA".
+  function postalTight(value) {
+    return postalSlugPart(value).replace(/[^A-Z0-9]/g, '');
+  }
+
+  // Transliteration-tolerant form. The tile and the sheet spell the same local unit
+  // differently often enough to matter (Balefi / Balephi, Illam / Ilam, Sunwarshi /
+  // Sunawarshi), so the common Nepali romanisation pairs are folded together. BOTH
+  // sides go through the same fold, so a spelling the two already share can never be
+  // broken by it - only spellings that already differ can come together.
+  function postalLoose(value) {
+    return postalTight(value)
+      .replace(/PH/g, 'F')
+      .replace(/BH/g, 'B')
+      .replace(/KH/g, 'K')
+      .replace(/TH/g, 'T')
+      .replace(/CH/g, 'C')
+      .replace(/SH/g, 'S')
+      .replace(/V/g, 'W')
+      .replace(/EE/g, 'I')
+      .replace(/OO/g, 'U')
+      .replace(/AA/g, 'A')
+      .replace(/([A-Z])\1+/g, '$1');
+  }
+
+  // Levenshtein similarity, 0..1. Only ever used as the LAST resort, scoped to one
+  // district (a handful of candidates), and only accepted with a clear margin over the
+  // runner-up - so it cannot silently pick a neighbouring local unit.
+  function postalSimilarity(a, b) {
+    var m = a.length;
+    var n = b.length;
+    if (!m || !n) return 0;
+    var prev = [];
+    for (var j = 0; j <= n; j++) prev[j] = j;
+    for (var i = 1; i <= m; i++) {
+      var current = [i];
+      for (var k = 1; k <= n; k++) {
+        current[k] = Math.min(
+          prev[k] + 1,
+          current[k - 1] + 1,
+          prev[k - 1] + (a.charAt(i - 1) === b.charAt(k - 1) ? 0 : 1)
+        );
+      }
+      prev = current;
+    }
+    return 1 - prev[n] / Math.max(m, n);
+  }
+
+  // A fuzzy name match has to clear both bars: similar enough on its own, AND a clear
+  // margin over the next best candidate in the district. Anything less is left
+  // unmatched - a wrong postal code is worse than none.
+  var POSTAL_FUZZY_MIN = 0.78;
+  var POSTAL_FUZZY_MARGIN = 0.1;
+  var POSTAL_DISTRICT_MIN = 0.75;
+
+  var postalDistrictAlias = new Map(); // "3|CHITAWAN" -> "CHITWAN"
+  var postalMatchStats = { code: 0, key: 0, loose: 0, fuzzy: 0, miss: 0 };
+  var postalLastPath = '';
+
+  function postalBuildIndex(rows) {
+    var byCode = new Map();
+    var byKey = new Map();
+    var byLoose = new Map();
+    var byDistrict = new Map();
+    var duplicates = 0;
+    rows.forEach(function (row) {
+      // City Postal Code is distinct on every row, so it is a name-free key - and the
+      // municipality KML carries exactly this value in ex_Code.
+      var code = postalSlugPart(row.cityPostal);
+      if (code) byCode.set(code, row);
+
+      var state = postalSlugPart(row.stateCode);
+      var districtKey = state + '|' + postalSlugPart(row.district);
+
+      var key = districtKey + '|' + postalTight(row.gapaNapa);
+      if (byKey.has(key)) duplicates++;
+      else byKey.set(key, row);
+
+      var looseKey = districtKey + '|' + postalLoose(row.gapaNapa);
+      if (!byLoose.has(looseKey)) byLoose.set(looseKey, row);
+
+      if (!byDistrict.has(districtKey)) byDistrict.set(districtKey, []);
+      byDistrict.get(districtKey).push(row);
+    });
+    if (duplicates) {
+      console.warn(scriptName + ': ' + duplicates + ' duplicate postal join key(s) - keeping the first of each.');
+    }
+    return { byCode: byCode, byKey: byKey, byLoose: byLoose, byDistrict: byDistrict };
+  }
+
+  // The tile and the sheet do not always spell a district the same way (CHITAWAN vs
+  // CHITWAN), so a district that is not found verbatim is resolved once against the
+  // sheet's own district tokens for the same state, then memoised.
+  function postalResolveDistrict(state, district) {
+    var token = postalSlugPart(district);
+    var districtKey = state + '|' + token;
+    if (postalIndex.byDistrict.has(districtKey)) return token;
+    if (postalDistrictAlias.has(districtKey)) return postalDistrictAlias.get(districtKey);
+    var best = '';
+    var bestScore = 0;
+    postalIndex.byDistrict.forEach(function (list, key) {
+      if (key.slice(0, state.length + 1) !== state + '|') return;
+      var score = postalSimilarity(postalLoose(key.slice(state.length + 1)), postalLoose(token));
+      if (score > bestScore) {
+        bestScore = score;
+        best = key.slice(state.length + 1);
+      }
+    });
+    var resolved = bestScore >= POSTAL_DISTRICT_MIN ? best : '';
+    postalDistrictAlias.set(districtKey, resolved);
+    return resolved;
+  }
+
+  function postalFuzzyRow(districtKey, gapaNapa) {
+    var candidates = postalIndex.byDistrict.get(districtKey);
+    if (!candidates || !candidates.length) return null;
+    var wanted = postalLoose(gapaNapa);
+    var best = null;
+    var bestScore = 0;
+    var secondScore = 0;
+    candidates.forEach(function (row) {
+      var score = postalSimilarity(postalLoose(row.gapaNapa), wanted);
+      if (score > bestScore) {
+        secondScore = bestScore;
+        bestScore = score;
+        best = row;
+      } else if (score > secondScore) {
+        secondScore = score;
+      }
+    });
+    if (!best || bestScore < POSTAL_FUZZY_MIN) return null;
+    if (bestScore - secondScore < POSTAL_FUZZY_MARGIN) return null;
+    return best;
+  }
+
+  // Resolves a feature to its sheet row. The order is deliberate: an exact postal code
+  // first (name-free), then the exact name, then the transliteration fold, then - last
+  // resort and district-scoped - a fuzzy name match. `postalLastPath` names the path
+  // that succeeded, which is what the match summary logs.
+  function postalLookupRow(stateCode, district, gapaNapa, explicitCode) {
+    if (!postalIndex) return null;
+    var code = postalSlugPart(explicitCode);
+    if (code && postalIndex.byCode.has(code)) {
+      postalLastPath = 'code';
+      return postalIndex.byCode.get(code);
+    }
+    var state = postalSlugPart(stateCode);
+    var resolved = postalResolveDistrict(state, district);
+    if (!resolved) return null;
+    var districtKey = state + '|' + resolved;
+    var hit = postalIndex.byKey.get(districtKey + '|' + postalTight(gapaNapa));
+    if (hit) {
+      postalLastPath = 'key';
+      return hit;
+    }
+    hit = postalIndex.byLoose.get(districtKey + '|' + postalLoose(gapaNapa));
+    if (hit) {
+      postalLastPath = 'loose';
+      return hit;
+    }
+    hit = postalFuzzyRow(districtKey, gapaNapa);
+    if (hit) postalLastPath = 'fuzzy';
+    return hit;
+  }
+
+  // True only for a feature that actually names a local unit. A province or district
+  // outline carries none, and is skipped before it can count as an unmatched row.
+  function postalFeatureIsJoinable(properties) {
+    return !!(properties && (properties.ex_gapa_napa || properties.ex_GAPA_NAP_2));
+  }
+
+  // The sheet row for a loaded feature, read from its own KML properties. A ward KML
+  // carries ex_state_code / ex_district / ex_gapa_napa; the municipality KML carries
+  // ex_PROVINCE_2 / ex_DISTRICT_3 / ex_GAPA_NAP_2 plus its own exact ex_Code.
+  function postalLookupProperties(properties) {
+    if (!properties) return null;
+    return postalLookupRow(
+      properties.ex_state_code || properties.ex_PROVINCE_2,
+      properties.ex_district || properties.ex_DISTRICT_3,
+      properties.ex_gapa_napa || properties.ex_GAPA_NAP_2,
+      properties.ex_Code
+    );
+  }
+
+  // The 7-digit ward code: the sheet's 5-digit city code with the ward number padded to
+  // two digits appended (10106 + ward 1 -> "1010601"). A ward outside the sheet's own
+  // Ward Count is left WITHOUT a ward code rather than given a wrong one.
+  function postalWardCode(row, wardNo) {
+    var base = postalSlugPart(row && row.cityPostal);
+    if (!base) return '';
+    var ward = Number(wardNo);
+    if (!isFinite(ward) || ward < 1) return '';
+    var count = Number(row.wardCount);
+    if (isFinite(count) && count >= 1 && ward > count) return '';
+    return base + String(ward).padStart(2, '0');
+  }
+
+  // Writes the postal properties onto a loaded feature. Returns true on a match.
+  function postalAnnotateFeature(properties) {
+    if (!postalIndex || !postalFeatureIsJoinable(properties)) return false;
+    postalLastPath = '';
+    var row = postalLookupProperties(properties);
+    if (!row) {
+      postalMatchStats.miss++;
+      // Fail OPEN: no match simply means no postal properties, never a wrong one.
+      delete properties.postal_code;
+      delete properties.postal_ward_code;
+      delete properties.postal_state;
+      return false;
+    }
+    postalMatchStats[postalLastPath] += 1;
+    properties.postal_code = postalSlugPart(row.cityPostal);
+    var wardCode = postalWardCode(row, properties.ex_new_ward_n);
+    if (wardCode) properties.postal_ward_code = wardCode;
+    else delete properties.postal_ward_code;
+    // The full province name, from the row's own State Code through the shared map (the
+    // sheet's province column is only the fallback), so it can be picked as a label field
+    // without the address card being involved at all.
+    var stateName = postalStateName(row.stateCode) || String(row.province || '').trim();
+    if (stateName) properties.postal_state = stateName;
+    else delete properties.postal_state;
+    return true;
+  }
+
+  // Re-annotates every loaded layer - used when the sheet arrives after them. Every
+  // feature that names a local unit is tried, so the municipality level is covered as
+  // well as the wards; a province or district outline is skipped inside the annotator.
+  function postalApplyToLoadedLayers() {
+    if (!postalIndex) return 0;
+    postalMatchStats = { code: 0, key: 0, loose: 0, fuzzy: 0, miss: 0 };
+    var touched = 0;
+    loadedGeoJSONLayers.forEach(function (info) {
+      if (!info || !Array.isArray(info.sdkFeatures)) return;
+      var matched = 0;
+      info.sdkFeatures.forEach(function (feature) {
+        if (postalAnnotateFeature(feature.properties)) matched++;
+      });
+      if (matched) {
+        scheduleStyleApply(info.name); // picks up a postal label field if one is set
+        touched++;
+      }
+    });
+    var total =
+      postalMatchStats.code + postalMatchStats.key + postalMatchStats.loose + postalMatchStats.fuzzy;
+    console.log(
+      scriptName +
+        ': postal codes applied to ' +
+        total +
+        ' feature(s) in ' +
+        touched +
+        ' layer(s) - by code ' +
+        postalMatchStats.code +
+        ', exact name ' +
+        postalMatchStats.key +
+        ', folded name ' +
+        postalMatchStats.loose +
+        ', fuzzy ' +
+        postalMatchStats.fuzzy +
+        ', unmatched ' +
+        postalMatchStats.miss +
+        '.'
+    );
+    // A segment can already be selected while the sheet is arriving, so the address card
+    // (which shows the code) has to be rebuilt once the codes exist.
+    postalScheduleAddressCard();
+    return touched;
+  }
+
+  var postalSelfCheckResult = null;
+
+  // Cross-checks our derived ward code against the sheet's own "Ward Postal Codes" cell
+  // ("1010601 to 11"). This is a canary for a change of convention in the sheet: if the
+  // government ever stops using the padded-ward suffix, the mismatch count says so
+  // instead of the codes silently going wrong.
+  //
+  // It also re-derives the province from the code itself. The 7-digit code is 1+2+2+2 -
+  // province, district, municipality, ward (2060105 = province 2, district 06,
+  // municipality 01, ward 05) - so the first digit of the 5-digit city code has to equal
+  // the row's own State Code. That is an independent check of the two keys the join is
+  // indexed on, not just of the ward suffix.
+  function postalSelfCheck() {
+    if (!postalRows || !postalRows.length) return null;
+    var checked = 0;
+    var mismatched = 0;
+    var stateChecked = 0;
+    var stateMismatched = 0;
+    postalRows.forEach(function (row) {
+      var match = String(row.wardPostalRange || '').match(/\d{5,}/);
+      if (match) {
+        var derived = postalWardCode(row, 1);
+        if (derived) {
+          checked++;
+          if (derived !== match[0]) mismatched++;
+        }
+      }
+      var code = postalSlugPart(row.cityPostal);
+      var state = postalSlugPart(row.stateCode);
+      if (/^\d{5}$/.test(code) && /^\d+$/.test(state)) {
+        stateChecked++;
+        if (Number(code.charAt(0)) !== Number(state)) stateMismatched++;
+      }
+    });
+    postalSelfCheckResult = checked ? { checked: checked, mismatched: mismatched } : null;
+    if (checked) {
+      console.log(
+        scriptName +
+          ': postal self-check - ' +
+          (checked - mismatched) +
+          '/' +
+          checked +
+          ' sheet rows match the derived ward-1 code' +
+          (mismatched ? ' (' + mismatched + ' differ).' : '.')
+      );
+    }
+    if (stateChecked) {
+      console.log(
+        scriptName +
+          ': postal self-check - ' +
+          (stateChecked - stateMismatched) +
+          '/' +
+          stateChecked +
+          ' sheet rows have a city code whose province digit matches the State Code' +
+          (stateMismatched ? ' (' + stateMismatched + ' differ).' : '.')
+      );
+    }
+    return postalSelfCheckResult;
+  }
+
+  // --- IndexedDB cache (shares the style store) ---------------------------
+  function postalLoadCached() {
+    return styleDbGet(POSTAL_DB_KEY).then(function (record) {
+      var value = record && record.style;
+      return value && Array.isArray(value.rows) ? value : null;
+    });
+  }
+
+  // The postal sheet is by far the largest record this script writes - one row per ward,
+  // each with several fields - so it is the one put that asks to close its transaction
+  // immediately instead of leaving the engine to decide when the queue has drained.
+  function postalSaveCached(rows, fetchedAt) {
+    return styleDbRequest('readwrite', function (store) {
+      return store.put({ key: POSTAL_DB_KEY, style: { rows: rows, fetchedAt: fetchedAt } });
+    }, true);
+  }
+
+  function postalClearCached() {
+    return styleDbDelete(POSTAL_DB_KEY);
+  }
+
+  function postalFetchRows() {
+    return npGisFetchText(POSTAL_SHEET_URL, 45000).then(postalParseGviz);
+  }
+
+  function postalInstallRows(rows, fetchedAt, source) {
+    postalRows = rows;
+    postalIndex = postalBuildIndex(rows);
+    postalDistrictAlias = new Map(); // any district alias is derived from the old index
+    postalFetchedAt = Number(fetchedAt) || Date.now();
+    postalLoaded = true;
+    console.log(scriptName + ': postal codes ready from ' + source + ' (' + rows.length + ' rows).');
+    postalSelfCheck();
+    postalApplyToLoadedLayers();
+  }
+
+  // Loads the sheet, preferring a still-fresh cache. `force` always re-fetches.
+  function postalEnsureLoaded(force) {
+    if (postalLoadPromise && !force) return postalLoadPromise;
+    if (postalLoaded && !force) return Promise.resolve();
+    postalSetStatus('loading', '', '');
+    postalLoadPromise = Promise.resolve()
+      .then(function () {
+        return force ? null : postalLoadCached();
+      })
+      .then(function (cached) {
+        if (cached) {
+          var age = Date.now() - Number(cached.fetchedAt || 0);
+          if (age >= 0 && age < POSTAL_CACHE_TTL_MS) {
+            postalInstallRows(cached.rows, cached.fetchedAt, 'cache');
+            postalSetStatus('ready', '', '');
+            return null;
+          }
+        }
+        return postalFetchRows().then(function (rows) {
+          var fetchedAt = Date.now();
+          postalInstallRows(rows, fetchedAt, 'network');
+          postalSetStatus('ready', '', '');
+          return postalSaveCached(rows, fetchedAt);
+        });
+      })
+      .catch(function (e) {
+        var message = e && e.message ? e.message : String(e);
+        if (postalLoaded) {
+          // Keep serving the last known codes rather than emptying the map.
+          postalSetStatus('ready', 'refresh failed (' + message + ')', '');
+          return null;
+        }
+        return postalLoadCached().then(function (cached) {
+          if (cached) {
+            postalInstallRows(cached.rows, cached.fetchedAt, 'stale cache');
+            postalSetStatus('ready', 'stale cache - ' + message, '');
+            return null;
+          }
+          postalSetStatus('error', '', message);
+        });
+      })
+      .then(function () {
+        postalLoadPromise = null;
+      });
+    return postalLoadPromise;
+  }
+
+  // --- Persisted switches -------------------------------------------------
+  function loadPostalState() {
+    var saved = npwLoadJson(POSTAL_STATE_KEY, {});
+    if (typeof saved.wardCodes === 'boolean') postalWardCodes = saved.wardCodes;
+    if (typeof saved.autoLoad === 'boolean') postalAutoLoad = saved.autoLoad;
+    if (typeof saved.subCity === 'boolean') postalSubCity = saved.subCity;
+    if (typeof saved.provinceSuffix === 'boolean') postalProvinceSuffix = saved.provinceSuffix;
+  }
+
+  function savePostalState() {
+    npwSaveJson(POSTAL_STATE_KEY, {
+      wardCodes: postalWardCodes,
+      autoLoad: postalAutoLoad,
+      subCity: postalSubCity,
+      provinceSuffix: postalProvinceSuffix,
+    });
+  }
+
+  // "Postal Codes" card in the Settings tab: loads/refreshes the sheet, reports what is
+  // cached, and picks between the 5-digit city code and the 7-digit ward code.
+  // `refreshAttributes` re-reads the label-field attribute list, which is how the new
+  // postal_code / postal_ward_code keys appear in the picker.
+  function buildPostalCard(host, refreshAttributes) {
+    var card = npwCard(host, 'Postal Codes');
+    card.appendChild(
+      npwCreate(
+        'div',
+        'npw-status',
+        'Postal codes come from the published government address sheet and are matched to the loaded polygons ' +
+          'by <em>State Code + District + GaPa/NaPa</em> - taken from the KML\'s own fields, not from the Waze ' +
+          'city name. A municipality matches by its own postal code where the KML carries one; a ward falls back ' +
+          'to its name, folding the common Nepali romanisation pairs and, last, a district-scoped fuzzy match. ' +
+          'The 5-digit city code is read from the sheet; the 7-digit ward code is derived from it plus the ward ' +
+          'number. Matches are written to every matched feature as postal_code, postal_ward_code and ' +
+          'postal_state (the full province name - KO/MA/BA/GA/LU/KA/SU or 1-7), so any of them can be chosen ' +
+          'as a label field.'
+      )
+    );
+
+    var statusEl = npwCreate('div', 'npw-status', '');
+    statusEl.id = 'npwPostalStatus';
+    card.appendChild(statusEl);
+
+    var wardToggle = npwCreate('label', 'npw-field-toggle');
+    wardToggle.title = 'On: the 7-digit ward code (1010601). Off: the 5-digit city code (10106).';
+    var wardBox = document.createElement('input');
+    wardBox.type = 'checkbox';
+    wardBox.id = 'npwPostalWardCodes';
+    wardBox.className = 'npw-checkbox';
+    wardToggle.appendChild(wardBox);
+    wardToggle.appendChild(document.createTextNode('Use the 7-digit ward postal code'));
+    card.appendChild(wardToggle);
+
+    var autoToggle = npwCreate('label', 'npw-field-toggle');
+    autoToggle.title = 'Fetch the sheet once at start-up. A cached copy is reused for 24 hours.';
+    var autoBox = document.createElement('input');
+    autoBox.type = 'checkbox';
+    autoBox.id = 'npwPostalAutoLoad';
+    autoBox.className = 'npw-checkbox';
+    autoToggle.appendChild(autoBox);
+    autoToggle.appendChild(document.createTextNode('Load on start-up (cached 24 h)'));
+    card.appendChild(autoToggle);
+
+    var subCityToggle = npwCreate('label', 'npw-field-toggle');
+    subCityToggle.title =
+      'Put the Waze city in front of the ward part of the address card, e.g. ' +
+      '"Pathlaiya, Jitpur Simara-1, Bara, Madhesh, 2070301, Nepal". The Waze city is the sub-city / area / ' +
+      'tole within the ward\'s local unit, which is why it goes before the ward. Turn this off to copy the ' +
+      'address without it.';
+    var subCityBox = document.createElement('input');
+    subCityBox.type = 'checkbox';
+    subCityBox.id = 'npwPostalSubCity';
+    subCityBox.className = 'npw-checkbox';
+    subCityToggle.appendChild(subCityBox);
+    subCityToggle.appendChild(document.createTextNode('Combine the sub-city in the address'));
+    card.appendChild(subCityToggle);
+
+    var provinceToggle = npwCreate('label', 'npw-field-toggle');
+    provinceToggle.title =
+      'Write the province out in full in the address card, e.g. "Bagmati Province" instead of a bare "Bagmati". ' +
+      'The word is only added to a name the script resolved from its own code-to-name map, so a token it does not ' +
+      'know is still printed exactly as the KML wrote it. Turn this off for the bare name.';
+    var provinceBox = document.createElement('input');
+    provinceBox.type = 'checkbox';
+    provinceBox.id = 'npwPostalProvinceSuffix';
+    provinceBox.className = 'npw-checkbox';
+    provinceToggle.appendChild(provinceBox);
+    provinceToggle.appendChild(document.createTextNode('Combine Province in the address'));
+    card.appendChild(provinceToggle);
+
+    var buttons = npwButtonRow(card);
+    var refreshBtn = npwButton(
+      buttons,
+      'Load / Refresh',
+      'Fetch the sheet and rebuild the postal index',
+      'primary'
+    );
+    var clearBtn = npwButton(buttons, 'Clear cache', 'Forget the cached copy of the sheet', 'danger');
+
+    refreshBtn.addEventListener('click', function () {
+      postalEnsureLoaded(true);
+    });
+    clearBtn.addEventListener('click', function () {
+      postalClearCached().then(function () {
+        postalRows = null;
+        postalIndex = null;
+        postalLoaded = false;
+        postalFetchedAt = 0;
+        postalSetStatus('idle', '', '');
+      });
+    });
+    wardBox.addEventListener('change', function () {
+      postalWardCodes = wardBox.checked;
+      savePostalState();
+      postalNotifyUi();
+    });
+    autoBox.addEventListener('change', function () {
+      postalAutoLoad = autoBox.checked;
+      savePostalState();
+      if (postalAutoLoad) postalEnsureLoaded(false);
+    });
+    subCityBox.addEventListener('change', function () {
+      postalSubCity = subCityBox.checked;
+      savePostalState();
+      // The card is always rebuilt from scratch, so the address it shows and copies
+      // follows this switch straight away - no repaint hook of its own is needed.
+      postalScheduleAddressCard();
+    });
+    provinceBox.addEventListener('change', function () {
+      postalProvinceSuffix = provinceBox.checked;
+      savePostalState();
+      postalScheduleAddressCard();
+    });
+
+    postalUiRefreshers.push(function () {
+      wardBox.checked = !!postalWardCodes;
+      autoBox.checked = !!postalAutoLoad;
+      subCityBox.checked = !!postalSubCity;
+      provinceBox.checked = !!postalProvinceSuffix;
+      statusEl.textContent = postalStatusText();
+      var busy = postalStatus === 'loading';
+      refreshBtn.disabled = busy;
+      refreshBtn.textContent = busy ? 'Loading...' : 'Load / Refresh';
+      if (refreshAttributes) refreshAttributes();
+    });
+
+    // First paint, then the start-up load.
+    wardBox.checked = !!postalWardCodes;
+    autoBox.checked = !!postalAutoLoad;
+    subCityBox.checked = !!postalSubCity;
+    provinceBox.checked = !!postalProvinceSuffix;
+    statusEl.textContent = postalStatusText();
+    if (postalAutoLoad) postalEnsureLoaded(false);
+  }
+
+  /* ------------------------------------------------------------------
+     Postal address card in the segment edit panel
+     Shows the community address format for the selected segment: street name,
+     the ward it sits in, its postal code and the country. The ward is found by
+     testing the segment's midpoint against the loaded ward polygons - bounding
+     box first, then a real point-in-polygon - so the code shown is the one
+     belonging to the ward the segment is actually inside.
+
+     It is inserted ABOVE the "Alternate addresses" block
+     (.alt-streets-control), i.e. directly under the address inputs.
+     ------------------------------------------------------------------ */
+  var POSTAL_ADDRESS_CARD_ID = 'npw-postal-address-card';
+  var postalAddressTimer = null;
+  var postalAddressRetry = 0; // bounded retries while the edit panel is still rendering
+
+  /** Ray-casting point-in-polygon test over a single ring. */
+  function postalPointInRing(point, ring) {
+    var x = point[0];
+    var y = point[1];
+    var inside = false;
+    for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      var xi = ring[i][0];
+      var yi = ring[i][1];
+      var xj = ring[j][0];
+      var yj = ring[j][1];
+      // Standard crossing test; the ring is treated as closed because j wraps to the
+      // last vertex on the first iteration.
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  function postalPointInFeature(point, feature) {
+    var geometry = feature && feature.geometry;
+    if (!geometry || !geometry.coordinates) return false;
+    if (geometry.type === 'Polygon') return postalPointInRing(point, geometry.coordinates[0]);
+    if (geometry.type === 'MultiPolygon') {
+      for (var i = 0; i < geometry.coordinates.length; i++) {
+        if (postalPointInRing(point, geometry.coordinates[i][0])) return true;
+      }
+    }
+    return false;
+  }
+
+  // The loaded ward polygon a point falls inside, or null. The precomputed __bbox makes
+  // this a four-number compare for all but the one or two features that can contain it.
+  function postalWardAtPoint(point) {
+    var found = null;
+    loadedGeoJSONLayers.forEach(function (info) {
+      if (found || info.layerType !== 'ward' || !Array.isArray(info.sdkFeatures)) return;
+      for (var i = 0; i < info.sdkFeatures.length; i++) {
+        var feature = info.sdkFeatures[i];
+        var box = featureBbox(feature);
+        if (box && (point[0] < box[0] || point[0] > box[2] || point[1] < box[1] || point[1] > box[3])) {
+          continue;
+        }
+        if (postalPointInFeature(point, feature)) {
+          found = feature;
+          return;
+        }
+      }
+    });
+    return found;
+  }
+
+  function postalRemoveAddressCard() {
+    var card = document.getElementById(POSTAL_ADDRESS_CARD_ID);
+    if (card) card.remove();
+  }
+
+  // "LALITPUR" -> "Lalitpur", "RUKUM EAST" -> "Rukum East". The KML carries the district -
+  // and sometimes the local unit - in SHOUTING CASE, which next to a normally-cased street
+  // name looked wrong. This is a DISPLAY-only fix: the join and every comparison keep the
+  // original value, they never see this one.
+  function postalTitleCase(value) {
+    return String(value)
+      .trim()
+      .toLowerCase()
+      .replace(/(^|[^a-z0-9])([a-z])/g, function (match, lead, ch) {
+        return lead + ch.toUpperCase();
+      });
+  }
+
+  // The KML's ex_Address ends with the two-letter state token ("Bhaktapur-9, BHAKTAPUR, BA").
+  // That token is expanded to the full province name - with or without the "Province"
+  // suffix, per the Settings switch (see postalProvinceLabel) - and the part before it is
+  // re-cased, so the card reads as a real address; an address whose last part is not a
+  // known token is returned exactly as the KML wrote it.
+  function postalExpandStateToken(address) {
+    var text = String(address);
+    var parts = text.split(',');
+    if (parts.length < 2) return text;
+    var lastIndex = parts.length - 1;
+    var token = parts[lastIndex];
+    var full = postalProvinceLabel(token);
+    if (!full) return text;
+    // Only the text of a part changes; whatever whitespace the KML put around the commas is
+    // kept, so a first part that has none does not silently gain a leading space.
+    var leadingSpace = function (part) {
+      var match = part.match(/^\s*/);
+      return match ? match[0] : '';
+    };
+    parts[lastIndex] = leadingSpace(token) + full;
+    // The part before the state token is the district in the three-part form ("ward, district,
+    // state") and the ward-municipality part when the address carries only two - either way
+    // it is what the KML shouts, so it is the one that needs re-casing.
+    parts[lastIndex - 1] = leadingSpace(parts[lastIndex - 1]) + postalTitleCase(parts[lastIndex - 1]);
+    return parts.join(',');
+  }
+
+  // "Bhaktapur-9, BHAKTAPUR, Bagmati" - the KML's own ex_Address with its state token
+  // expanded, when the ward is known.
+  function postalAddressMiddle(properties) {
+    if (!properties) return '';
+    var address = properties[NP_GIS_LABEL_FIELD];
+    if (address) return postalExpandStateToken(address);
+    var ward = properties.ex_new_ward_n;
+    var municipality = properties.ex_gapa_napa || '';
+    var head = municipality ? municipality + (ward ? '-' + ward : '') : '';
+    // ex_state_code is the numeric code and ex_Province is the two-letter token (the KML
+    // carries "BA", not "Bagmati"), so both go through the shared map before anything is
+    // printed. The fully-resolved name also picks up the "Province" suffix here, while a
+    // raw token that the map does not know is printed exactly as the KML wrote it.
+    var province =
+      postalProvinceLabel(properties.ex_state_code) ||
+      postalProvinceLabel(properties.ex_Province) ||
+      properties.ex_Province ||
+      '';
+    return [head, postalTitleCase(properties.ex_district), province].filter(Boolean).join(', ');
+  }
+
+  // The code to show, per the switch on the Postal Codes card.
+  function postalDisplayCode(properties) {
+    if (!properties) return '';
+    if (postalWardCodes) return properties.postal_ward_code || properties.postal_code || '';
+    return properties.postal_code || properties.postal_ward_code || '';
+  }
+
+  // The province as the address card writes it: the full name from the shared map, with
+  // the word "Province" appended ("Bagmati" -> "Bagmati Province") while the Settings
+  // switch is on. " Province" is only added to a name the map actually resolved, so a raw
+  // KML token ("BA") or a missing value is left alone rather than being dressed up as a
+  // name it is not - turning the switch off simply drops the suffix and leaves the name.
+  // Card display only: `postal_state` on a feature - and therefore any label field built
+  // from it - keeps the bare name the rest of the script works with.
+  function postalProvinceLabel(value) {
+    var name = postalStateName(value);
+    if (!name) return '';
+    return postalProvinceSuffix ? name + ' Province' : name;
+  }
+
+  // The sub-city / area / tole of the ward, taken from the sheet's "Waze City Name"
+  // column - the column the sheet itself uses to say which Waze city the ward belongs to
+  // (its "City Name" column is the local unit, i.e. the municipality). That is the name
+  // the address card shows and copies: while WME stores a per-place city, "Pathlaiya" is
+  // an area WITHIN Jitpur Simara, not a second municipality, so the sheet's value is the
+  // one that belongs in a postal address. Rendered EXACTLY as the sheet writes it - a
+  // name that carries Devanagari is left alone, and so is its casing.
+  function postalSubCityName(sheetRow) {
+    return postalNormalizeWazeName(sheetRow && sheetRow.wazeCity);
+  }
+
+  // True when the Waze city of the segment is a sub-city of the ward the segment sits in,
+  // i.e. the sheet names a different Waze city for that ward. The comparison is the exact
+  // one the card's warning uses - normalised whitespace/Unicode form, no transliteration -
+  // and it is shared so the inserted name and the warning can never disagree about
+  // whether there is a sub-city at all. '' on either side means the sheet cannot say, and
+  // then nothing is inserted and nothing is warned about.
+  function postalIsSubCity(cityName, sheetRow) {
+    var city = postalNormalizeWazeName(cityName);
+    var subCity = postalSubCityName(sheetRow);
+    return !!(city && subCity && city !== subCity);
+  }
+
+  // WME's placeholders for a missing name must not be shown as if they were real names.
+  function postalRealName(name) {
+    var text = name ? String(name).trim() : '';
+    if (!text || /^none$/i.test(text) || /^unnamed/i.test(text)) return '';
+    return text;
+  }
+
+  // Street + city of a segment in ONE SDK call. Segments.getAddress() returns the
+  // resolved SegmentAddress ({ street, city, state, country, altStreets }), which is what
+  // the edit panel itself shows. This is the only way to get the city: the Segment object
+  // carries primaryStreetId but NO city id of its own.
+  // The city is used for CHECKING only - the match is driven by the ward polygon - so a
+  // missing or renamed city can only ever be reported, never allowed to change the code.
+  function postalSegmentAddress(segment) {
+    var names = { street: '', city: '' };
+    try {
+      if (!segment) return names;
+      var address = wmeSDK.DataModel.Segments.getAddress({ segmentId: segment.id });
+      if (!address) return names;
+      names.street = postalRealName(address.street && address.street.name);
+      names.city = postalRealName(address.city && address.city.name);
+    } catch (e) {
+      console.warn(scriptName + ': could not read the segment address', e);
+    }
+    return names;
+  }
+
+  // Street + city of a venue in ONE SDK call, the way postalSegmentAddress does it for a
+  // segment. Venues.getAddress() is the same shape ({ street, city, state, country, ... }),
+  // so a venue's address is read from the same place the editor reads it - rather than
+  // scraped from the panel, which would break on a WME rename.
+  // A venue whose address was never filled in comes back with WME's "None" placeholder,
+  // which is filtered here exactly as it is for a street name.
+  function postalVenueAddress(venue) {
+    var names = { street: '', city: '', houseNumber: '' };
+    try {
+      if (!venue) return names;
+      var address = wmeSDK.DataModel.Venues.getAddress({ venueId: venue.id });
+      if (!address) return names;
+      names.street = postalRealName(address.street && address.street.name);
+      names.city = postalRealName(address.city && address.city.name);
+      // A venue has a house number, a segment does not - it is the one field the venue address
+      // carries on top of the base address, and it belongs in front of the street.
+      names.houseNumber = postalRealName(address.houseNumber);
+    } catch (e) {
+      // A venue that carries no address at all is normal - its fields are left untouched - so
+      // this is a plain miss rather than a warning-worthy failure.
+      return names;
+    }
+    return names;
+  }
+
+  // The element WME is rendering the feature editor into, or null.
+  // A segment panel is #edit-panel and a venue panel is #venue-edit-general - plain document
+  // elements, so one lookup each is enough, and they are the only two ids WME uses for a
+  // feature this script shows a card for.
+  function postalEditPanel() {
+    return document.getElementById('edit-panel') || document.getElementById('venue-edit-general');
+  }
+
+  // Attaches the card to the feature editor, or removes it when there is nowhere to put it.
+  // A segment and a venue panel expose the same address container, `.address-edit-view`, and it
+  // is the only anchor used. A segment also has `.alt-streets-control` inside it, a venue does
+  // not - hence the two branches: insert before that block when it exists, otherwise append to
+  // the view, which lands the card under the address fields either way.
+  // Nothing is ever appended to the panel itself, so the card can never end up above the whole
+  // form - the failure this avoids.
+  // @param {Element} card the card to place
+  // @returns {boolean} true when the card was attached
+  function postalPlaceAddressCard(card) {
+    var view = document.querySelector('#edit-panel .address-edit-view, #venue-edit-general .address-edit-view');
+    if (!view) {
+      // Nowhere to put it: keep the card out of the way rather than guessing a position.
+      if (card.parentNode) card.parentNode.removeChild(card);
+      return false;
+    }
+    var block = view.querySelector('.alt-streets-control');
+    if (block) view.insertBefore(card, block);
+    else view.appendChild(card);
+    return true;
+  }
+
+  // Which kind of edit panel is open, and the segment or venue it holds.
+  // The card is shown for a segment and for a venue: both carry a Waze address and both can sit
+  // inside a ward, and the ward polygon decides the code, never the feature type.
+  // A GOOGLE PLACE is deliberately not supported. It carries Google's own address text, which
+  // is frequently wrong for these places, and there is no way to tell from the panel whether
+  // the text on screen belongs to the ward the place sits in - so showing it would put a wrong
+  // address in front of a user who copies it straight into WME.
+  // @returns {{kind: string, segment: Object|null, venue: Object|null}|null} null when the
+  //   selection is not something with an address
+  function postalResolveTarget() {
+    var selection = null;
+    try {
+      selection = wmeSDK.Editing.getSelection();
+    } catch (e) {
+      return null;
+    }
+    if (!selection || !selection.ids || selection.ids.length !== 1) return null;
+
+    if (selection.objectType === 'segment') {
+      var segment = null;
+      try {
+        segment = wmeSDK.DataModel.Segments.getById({ segmentId: selection.ids[0] });
+      } catch (e) {
+        return null;
+      }
+      if (!segment || !segment.geometry || !segment.geometry.coordinates) return null;
+      return { kind: 'segment', segment: segment, venue: null };
+    }
+
+    if (selection.objectType === 'venue') {
+      var venue = null;
+      try {
+        // Venues are fetched by id, so the call is wrapped: an id the SDK cannot resolve
+        // simply means no card rather than a broken render.
+        venue = wmeSDK.DataModel.Venues.getById({ venueId: selection.ids[0] });
+      } catch (e) {
+        venue = null;
+      }
+      if (!venue) return null;
+      var hasGeometry =
+        venue.geometry &&
+        (venue.geometry.type === 'Point' || (venue.geometry.coordinates && venue.geometry.coordinates.length));
+      if (!hasGeometry) return null;
+      return { kind: 'venue', segment: null, venue: venue };
+    }
+
+    return null;
+  }
+
+  // The lon/lat a venue sits at, or null when there is nothing to test.
+  // The SDK types a venue's geometry as exactly `Point | Polygon` - there is no third case,
+  // and no MultiPolygon - so the shape needs no guessing: a point is its own coordinates, and
+  // an area venue is tested from the centre of its ring. Both come from `geometry.
+  // coordinates`, which is the same source the map itself draws from.
+  // The centroid rather than the first vertex matters for the area case: a ring vertex can be
+  // a spike, and a ward polygon must be tested with a point that is really inside the place.
+  function postalVenuePoint(venue) {
+    var geometry = venue && venue.geometry;
+    var coordinates = geometry && geometry.coordinates;
+    if (!coordinates || !coordinates.length) return null;
+
+    if (geometry.type === 'Point') {
+      var x = Number(coordinates[0]);
+      var y = Number(coordinates[1]);
+      return isFinite(x) && isFinite(y) ? [x, y] : null;
+    }
+
+    // Polygon: coordinates[0] is the outer ring, an array of [lon, lat] pairs. A venue is
+    // small (a building or a plot), so the average of the ring's vertices is inside it for
+    // any shape an editor could draw, and it is a single pass with no allocation.
+    var ring = coordinates[0];
+    if (!ring || !ring.length) return null;
+    var sumX = 0;
+    var sumY = 0;
+    var count = 0;
+    for (var i = 0; i < ring.length; i++) {
+      var pair = ring[i];
+      if (!pair || pair.length < 2) continue;
+      var lon = Number(pair[0]);
+      var lat = Number(pair[1]);
+      if (!isFinite(lon) || !isFinite(lat)) continue;
+      sumX += lon;
+      sumY += lat;
+      count++;
+    }
+    return count ? [sumX / count, sumY / count] : null;
+  }
+
+  // The street, house number and city to put in the address, per feature type.
+  // Both come from the SDK, which is the only place a segment's city exists at all and the
+  // same place the editor reads a venue's address from: `Segments.getAddress()` and
+  // `Venues.getAddress()` both return an address object with `street`, `city` and `state`
+  // (the venue one adds `houseNumber`).
+  // A venue's fields are often left untouched, and WME then reports them as "None" - so a
+  // venue without a street does not block the parts the ward polygon does know; the card just
+  // omits the absent part, exactly as it already does for a nameless street.
+  // The venue's own NAME is read as well: it is what a place is, and a venue with no street
+  // filled in would otherwise lead the address with nothing.
+  function postalAddressNames(target) {
+    var names = { street: '', houseNumber: '', city: '', name: '' };
+
+    if (target.kind === 'segment') {
+      var segmentNames = postalSegmentAddress(target.segment);
+      names.street = segmentNames.street;
+      names.city = segmentNames.city;
+      return names;
+    }
+
+    names.name = postalRealName(target.venue.name);
+    var venueAddress = postalVenueAddress(target.venue);
+    names.street = venueAddress.street;
+    names.houseNumber = venueAddress.houseNumber;
+    names.city = venueAddress.city;
+    return names;
+  }
+
+  /** Builds and places the card for the current selection (or removes it). */
+  function postalUpdateAddressCard() {
+    // Segment or place - both have a Waze address, so both get a card when they resolve.
+    var target = postalResolveTarget();
+    if (!target) {
+      postalRemoveAddressCard();
+      return;
+    }
+
+    var editPanel = postalEditPanel();
+    if (!editPanel) {
+      // The panel is rendered asynchronously. Retry briefly rather than giving up, or the
+      // card would stay missing until the next selection change.
+      if (postalAddressRetry < 5) {
+        postalAddressRetry++;
+        postalScheduleAddressCard(150);
+      }
+      return;
+    }
+    postalAddressRetry = 0;
+    // The panel exists now, so it can be watched for the re-render the address editor does.
+    postalEnsureAddressObserver();
+
+    // The point the card's ward is picked from: a segment's midpoint, a venue's own position.
+    var point = null;
+    if (target.kind === 'segment') {
+      var coordinates = target.segment.geometry.coordinates;
+      var mid = coordinates[Math.floor(coordinates.length / 2)] || coordinates[0];
+      point = [Number(mid[0]), Number(mid[1])];
+    } else {
+      point = postalVenuePoint(target.venue);
+    }
+
+    // The ward under that point, then everything read from it - the polygon decides the code
+    // for a place exactly as it does for a segment. A place that is not inside a loaded ward
+    // has no code to show; it may still have an address worth copying (see below).
+    var ward = point ? postalWardAtPoint(point) : null;
+    var properties = (ward && ward.properties) || null;
+
+    var names = postalAddressNames(target);
+    // The Waze city is read here rather than further down because the address needs it
+    // too: the sheet's Waze City Name is the sub-city of the ward, so it is inserted in
+    // front of the ward part (see postalSubCityName) when the "Combine the sub-city in
+    // the address" switch is on. The sheet lookup is shared with the warning below.
+    var cityName = names.city;
+    var sheetRow = properties ? postalLookupProperties(properties) : null;
+    var subCity = postalSubCity && postalIsSubCity(cityName, sheetRow) ? cityName : '';
+
+    // The ward-derived wording for this feature, or '' when the feature is not in a loaded
+    // ward. Shared by the address and the tooltip so the two can never disagree.
+    var middle = postalAddressMiddle(properties);
+    var code = postalDisplayCode(properties);
+
+    // Google's own address is deliberately NOT read or shown. It is frequently wrong for these
+    // places - the example that prompted dropping it was a Google place whose address control
+    // read "गढीमाई, मधेश प्रदेश 44400, Nepal" while the ward it actually sits in is Jitpur
+    // Simara-2 - and the card exists to be copied into WME's address field, so a wrong address
+    // leading it is worse than no card. The ward polygon is the authority, and the SDK's own
+    // address fields are the fallback; a Google place that is not inside a loaded ward simply
+    // gets the "not inside a loaded ward" note and no address to copy.
+    var placeStreet = [names.houseNumber, names.street].filter(Boolean).join(' ')
+      || (target.kind === 'venue' ? names.name : '');
+
+    var parts = [];
+    if (middle || code) {
+      // Everything the ward polygon knows, in the community's order.
+      parts = [placeStreet, subCity, middle, code, 'Nepal'];
+    } else if (placeStreet || names.city) {
+      // No ward, but the feature does carry a Waze address: show that rather than nothing, and
+      // let the warning below say why the code is missing.
+      parts = [placeStreet, names.city, 'Nepal'];
+    }
+    var fullAddress = parts.filter(Boolean).join(', ');
+
+    // Rebuilt rather than updated: WME re-renders this panel on its own schedule, and a
+    // fresh node is the only way to be sure the card is still attached.
+    postalRemoveAddressCard();
+
+    var card = npwCreate('div', 'npw-address-card');
+    card.id = POSTAL_ADDRESS_CARD_ID;
+
+    // ONE compact row: a postal envelope icon, the address, and the copy button. The
+    // ward/code detail is a tooltip rather than a line of its own, which is what keeps
+    // the whole thing to a single line above the address inputs.
+    var row = npwCreate('div', 'npw-address-row');
+    // An icon instead of the word "Postal": less width, and it means the same thing in
+    // any editor language. Inline SVG (static markup, no data interpolated) so it
+    // inherits the accent colour through currentColor - an emoji would not.
+    var icon = npwCreate('span', 'npw-address-icon');
+    icon.title = 'Postal address';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.innerHTML =
+      '<svg viewBox="0 0 16 16" width="13" height="13" focusable="false">' +
+      '<rect x="1.4" y="3.4" width="13.2" height="9.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+      '<path d="M2 4.3 8 8.6l6-4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+      '</svg>';
+    row.appendChild(icon);
+    row.appendChild(npwCreate('span', 'npw-address-value', fullAddress));
+    var copyBtn = npwButton(null, 'Copy', 'Copy this address to the clipboard', 'primary', 'npw-address-copy');
+    row.appendChild(copyBtn);
+    card.appendChild(row);
+
+    if (properties && properties.postal_code) {
+      var stateLabel = postalStateNameOf(properties) || properties.postal_state || '';
+      card.title =
+        target.kind === 'venue' ? 'Place — ' : '';
+      card.title +=
+        'Ward ' +
+        (properties.ex_new_ward_n !== undefined && properties.ex_new_ward_n !== null
+          ? properties.ex_new_ward_n
+          : '?') +
+        ' — city code ' +
+        properties.postal_code +
+        (properties.postal_ward_code ? ' — ward code ' + properties.postal_ward_code : '') +
+        (stateLabel ? ' — ' + stateLabel : '');
+    } else {
+      // Worth the extra line only when there is nothing to show: without it an absent
+      // code would just look like a broken card.
+      card.appendChild(
+        npwCreate(
+          'div',
+          'npw-address-warn',
+          (target.kind === 'venue'
+            ? 'No postal code: this place is not inside a loaded ward polygon. '
+            : 'No postal code: this segment is not inside a loaded ward polygon. ') +
+            'Tick the Ward level in the ' +
+            'Layers tab and zoom in to 14+ (see the Postal Codes card in Settings).'
+        )
+      );
+    }
+
+    // The Waze city is reported as a CHECK against the sheet, and never decides the code.
+    // Both values were already read above; only the sub-city DECISION is shared, and the
+    // sentence itself is deliberately not gated on the "Combine the sub-city" switch,
+    // because the disagreement is worth knowing about either way.
+    if (postalIsSubCity(cityName, sheetRow)) {
+      card.appendChild(
+        npwCreate(
+          'div',
+          'npw-address-warn',
+          'Waze city is "' + cityName + '" but the sheet lists "' + sheetRow.wazeCity + '" for this ward.'
+        )
+      );
+    }
+
+    // Inside the address view for either panel type - see postalPlaceAddressCard.
+    postalPlaceAddressCard(card);
+
+    copyBtn.addEventListener('click', function () {
+      try {
+        navigator.clipboard.writeText(fullAddress);
+        copyBtn.textContent = 'Copied';
+        setTimeout(function () {
+          copyBtn.textContent = 'Copy';
+        }, 1500);
+      } catch (e) {
+        console.warn(scriptName + ': clipboard copy failed', e);
+      }
+    });
+  }
+
+  // The edit panel is rendered asynchronously after the selection event, so every pass
+  // is deferred - and debounced, because a multi-click selection change fires it often.
+  // A call WITHOUT a delay is a fresh trigger (and clears the retry budget); the internal
+  // retries pass an explicit delay so they do not reset it.
+  function postalScheduleAddressCard(delayMs) {
+    if (delayMs === undefined) postalAddressRetry = 0;
+    clearTimeout(postalAddressTimer);
+    postalAddressTimer = setTimeout(function () {
+      postalAddressTimer = null;
+      try {
+        postalUpdateAddressCard();
+      } catch (e) {
+        console.warn(scriptName + ': could not build the postal address card', e);
+      }
+    }, delayMs === undefined ? 150 : delayMs);
+  }
+
+  // Opening the address editor on an already-selected segment is WME's own business, and it
+  // re-renders the panel without changing the selection or opening the editor - so no event
+  // the script subscribes to fires, and the card keeps whatever position the previous
+  // render gave it. Watching the panel's subtree closes that gap: any re-render re-runs the
+  // placement, which is idempotent (the card is only ever inserted before the
+  // alternate-addresses block, and WME removing or replacing that block simply lets the
+  // observer put the card back).
+  //
+  // The callback does no DOM work of its own - it debounces into postalScheduleAddressCard -
+  // so the observer can never feed itself into a loop, and the node count is never read.
+  var postalAddressObserver = null;
+  function postalEnsureAddressObserver() {
+    if (postalAddressObserver || typeof MutationObserver !== 'function') return;
+    var target = postalEditPanel();
+    if (!target) return;
+    postalAddressObserver = new MutationObserver(function () {
+      postalScheduleAddressCard(60);
+    });
+    postalAddressObserver.observe(target, { childList: true, subtree: true });
+  }
+
   // Function to create a feature-layer SDK layer. Today this is the LMC ward address
   // points and boundary; any future importer (KML, GPX, ...) that produces GeoJSON
   // features can call it with its own layer name and type.
@@ -4311,6 +7165,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       // context: the getters close over it, so the Style Settings card can restyle the
       // layer later with redrawLayer() alone.
       writeLayerStyleState(layerName, resolveStyleValues(rawStyleValues(layerName)));
+      applyLayerStyleAugment(layerName);
 
       console.log(`${scriptName}: Creating ${layerType} SDK layer for Ward ${wardNo}`);
       console.log(`${scriptName}: GeoJSON data:`, geojsonData);
@@ -4361,6 +7216,16 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
             }
             properties.custom_label = labelParts.join('\n');
           }
+        } else if (layerType === 'ward') {
+          // Nepal GIS ward KML. GeoKMLer prefixes every <SimpleData> name with "ex_",
+          // so the ward title is ex_Address ("Bhaktapur-9, BHAKTAPUR, BA"). The label
+          // comes from custom_label, which is what buildLayerStyleContext reads.
+          const wardTitle = properties[NP_GIS_LABEL_FIELD];
+          properties.custom_label =
+            wardTitle === null || wardTitle === undefined ? '' : String(wardTitle);
+          // Postal codes for this ward when the sheet is already in memory. If it is
+          // not, postalApplyToLoadedLayers() annotates this layer the moment it arrives.
+          postalAnnotateFeature(properties);
         }
         // Precompute the bbox the view windowing compares against (see windowLayerFeatures)
         const featureBboxBox = lmcBboxOfCoordinates(feature.geometry.coordinates);
@@ -4474,166 +7339,8 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
 
   unsafeWindow.SDK_INITIALIZED.then(bootstrap);
   /*
-changeLog
-2026.09.14.005
-<strong>Added - "Only put the current view on the map" (Lalitpur HN Address Wards):</strong><br>
-- A loaded ward now puts only the features inside the map view on its layer, rather than every feature of the ward. The view is padded by 50% (<code>LMC_WINDOW_PADDING</code>, the same margin the ward eviction test uses), so nothing pops in at the edge.<br>
-- The window follows the padded-viewport + retain model WME uses for its own map objects: while the view stays inside the already loaded window nothing is touched; when you pan to a new area the layer is topped up with the features that entered and the ones that left are removed (<code>Map.removeFeaturesFromLayer</code> + <code>dangerouslyAddFeaturesToLayerWithoutValidation</code>, one batched call each).<br>
-- The ward itself is still fetched once and kept whole in memory (<code>loadedGeoJSONLayers[].sdkFeatures</code>), so panning never re-downloads and shifting/styling keep working on the complete set.<br>
-- Every feature now carries a precomputed bbox (<code>properties.__bbox</code>), which makes re-windowing a four-number compare per feature. The bbox is translated with the coordinates when a layer is shifted, and the shift/reset paths re-window instead of re-adding every feature.<br>
-- New switch <em>Only put the current view on the map</em> in the ward group card (on by default, remembered in <code>localStorage._wme_nepali_wms_lmc_auto</code>). Turning it off immediately puts the whole loaded ward back on the map.<br>
-- <em>Clear auto-loaded layers</em>, unticking a ward, eviction and the Style Settings card are unaffected; the window bookkeeping is dropped with the layer.<br><br>
-2026.09.14.004
-<strong>Changed - Style Settings defaults:</strong><br>
-- The default feature-layer style now reproduces the previous LMC ward GeoJSON look instead of the neutral WME GeoFile blue: stroke <code>#FF5722</code> (orange), line width 2 px at 80% opacity, label size 13 px with white text and a black outline, centred on the feature (OL2 <code>labelAlign: cm</code>).<br>
-- <strong>Fill Opacity now defaults to 0</strong>, so ward polygons render as outlines only (the previous building fill was 0.01 and the boundary fill 0.05). Raise it with the <em>Fill Opacity</em> slider when a filled area is wanted.<br>
-- These are the fallback values, used when neither the global style nor a layer override has been touched. A previously saved global style or per-layer override still wins - press <em>Reset to defaults</em> (global) or <em>Reset this layer</em> to pick up the new values.<br>
-- Ward addresses and ward boundaries now share these defaults; give one of them an override in the <em>Apply to</em> dropdown to keep their colours apart again.<br><br>
-2026.09.14.003
-<strong>Added - Style Settings (Settings tab):</strong><br>
-- Ported the "Style Settings" card from WME GeoFile (WME-NP-GIS-Layers). It styles every non-WMS/XYZ layer - the LMC ward address/boundary layers today, and any KML, KMZ, GML, GPX, WKT or ZIP(SHP) importer added later. WMS and XYZ layers keep their own opacity control and are deliberately untouched.<br>
-- Controls: Stroke Color, Font Size, Label Color and Outline Color (each with a <em>Match stroke</em> switch), Outline Width (optionally <em>Relative to font size</em>, i.e. fontSize / 4), Fill Opacity, Line Size, Line Style (Solid / Dash / Dot), Line Opacity and Label Position (horizontal Left/Center/Right + vertical Top/Middle/Bottom, which becomes the OL2 <code>labelAlign</code>).<br>
-- One <em>global</em> style plus an optional <em>per-layer override</em>: the <em>Apply to</em> dropdown switches between <em>All layers (global)</em> and a single loaded layer. <em>Reset to defaults</em> clears the global style, <em>Reset this layer</em> drops that layer's override so it follows the global style again.<br>
-- Changes restyle already loaded layers with <code>Map.redrawLayer()</code> - no feature is removed or re-added - and are debounced (200 ms), so dragging a slider redraws once. Styles and overrides persist in IndexedDB (<code>NepaliWMSFeatureStyles</code> &gt; <code>styles</code>).<br>
-- The hard-coded per-type styles (<code>GEOJSON_LAYER_STYLES</code>) and the two label inputs in the old GeoJSON card are gone; the style engine is the single source of truth. Note that buildings and boundaries now share the global style by default (boundaries stay unlabelled) - give one of them an override to keep their colours apart.<br><br>
-<strong>Added - "Lalitpur HN Address Wards" (Layers tab):</strong><br>
-- The manual <em>Load GeoJSON from URL</em> card (ward dropdown, label colour/size inputs, <em>Load Buildings</em> button) is retired. In its place is a collapsible group card with a master switch, an <em>Auto-remove off-screen layers</em> switch, one checkbox per ward (1-29, all off by default) and a single <em>Clear auto-loaded layers</em> button.<br>
-- A ticked ward is loaded automatically as soon as its bounding box intersects the map view: its address points (<code>x_building.php?ward_no=N</code>) and its ward boundary (<code>x_ward_bnd.php?ward_no=N</code>), including the house-number / road-name labels the ward addresses carry.<br>
-- The loader follows the WME GeoFile KML loader: a debounced <code>wme-map-move-end</code> pass, a zoom gate (11+), batches of 4 downloads, a padded-viewport eviction test with an 8 s grace period, and a 60-layer hard cap. <em>Auto-remove</em> can be switched off to keep loaded wards on the map.<br>
-- The LMC endpoints are per-ward and carry no bbox, so each ward's bbox is derived once from its boundary file and cached in IndexedDB (<code>lmc-ward-bboxes</code>) - afterwards a reload needs no boundary request at all. The master switch, the ticked wards and the auto-remove flag live in <code>localStorage._wme_nepali_wms_lmc_auto</code>.<br>
-- Loaded ward layers are ordinary feature layers: they appear in the Shifting dropdown, can be shifted/reset and are restyled by the Style Settings card.<br><br>
-2026.09.14.002
-<strong>Fixed - GeoJSON shift directions (again):</strong><br>
-- The GeoJSON pad moved the loaded layer <em>opposite</em> to the arrow for left/right and all four diagonals (up/down were unaffected). <code>2026.09.13.021</code> wrongly claimed the GeoJSON table had to be the horizontal <em>mirror</em> of the WMS table and restored that mirror; the mirror is what caused the original bug.<br>
-- The GeoJSON coordinates are WGS84 degrees, so <code>+dLon</code> is east and <code>+dLat</code> is north and the translated content moves the same way, which means <code>left</code> has to <em>decrease</em> the longitude. The table is now the full negation of the WMS <code>shiftLayer()</code> table (both axes) - WMS moves the requested bbox, so its content travels the other way.<br>
-- Restored <code>left: dx = -dist</code>, <code>right: dx = +dist</code>, <code>upleft: dx = -diag</code>, <code>upright: dx = +diag</code>, <code>downleft: dx = -diag</code>, <code>downright: dx = +diag</code> (the <code>dy</code> values are unchanged). Every arrow now moves the GeoJSON layer the way it points, matching the WMS arrows.<br><br>
-2026.09.13.021
-<strong>Fixed - GeoJSON shift directions:</strong><br>
-- The GeoJSON pad moved the loaded layer <em>opposite</em> to the arrow for left/right and all four diagonals (up/down were unaffected). <code>.020</code> had "corrected" the GeoJSON direction table to match the WMS table, negating <code>dx</code>; that is wrong. The GeoJSON table is, by field-verified design, the horizontal <em>mirror</em> of the WMS table - WMS shifts the request bbox (content travels the opposite way) while GeoJSON translates feature coordinates directly, so the two must differ.<br>
-- Restored <code>left: dx = +dist</code>, <code>right: dx = -dist</code>, <code>upleft: dx = +diag</code>, <code>upright: dx = -diag</code>, <code>downleft: dx = +diag</code>, <code>downright: dx = -diag</code> (the <code>dy</code> values are unchanged). Every arrow now moves the GeoJSON layer the way it points, while the WMS arrows keep behaving as before.<br><br>
-2026.09.13.020
-<strong>Fixed - shift pad:</strong><br>
-- GeoJSON shift directions were mirrored horizontally: <em>left/right and all four diagonals moved the layer the wrong way</em> while up/down were correct. In WGS84 <code>+x</code> is east and <code>+y</code> is north and <code>dLon</code> is derived from <code>dx</code>, so the horizontal component is no longer negated. Every arrow now moves the loaded layer in the direction it points.<br>
-- The WMS arrows did nothing at all. The pad resolved the layer with <code>W.map.getLayers().find(l =&gt; l.name === &lt;name from the dropdown&gt;)</code>, but <code>addLayerToggler()</code> renames a toggler's layers to "&lt;display name&gt; 0", "&lt;display name&gt; 1" when it owns several, and the listing also depended on <code>layer.params.SERVICE</code> being upper-cased. The dropdown is now keyed by the <em>toggler</em> (<code>wms:&lt;toggler key&gt;</code>) and the layers are resolved by object identity (<code>wmsTogglersOnMap()</code> / <code>findWmsLayersForTarget()</code>), so no name matching is involved.<br>
-- A toggler's on-map layers are all shifted and reset together - the same set its checkbox controls - instead of only the one whose name happened to match.<br>
-- The pad no longer fails silently: if the selected layer is not on the map it now says so ("Layer Not On Map - switch the layer on first"), which is what made the WMS case look dead. The dropdown hint now mentions that only switched-on layers are listed.<br><br>
-2026.09.13.019
-<strong>UI - shared shift pad:</strong><br>
-- The WMS layers and the loaded GeoJSON layers now use <em>one</em> set of shift buttons. The "Layer tools" card in the <em>Shifting</em> tab has a single dropdown listing both kinds, grouped (<em>WMS layers</em> / <em>GeoJSON layers</em>), one distance field, one 3x3 pad and one <em>Reset Shift</em>.<br>
-- The option value carries the layer kind (<code>wms:&lt;name&gt;</code> / <code>geojson:&lt;name&gt;</code>) and the pad dispatches to the right engine through the new <code>shiftSelectedLayer()</code> / <code>resetSelectedLayerShift()</code>. The two engines are deliberately NOT merged: the WMS pad moves the requested bbox (content travels the opposite way) while the GeoJSON pad translates feature coordinates, and their direction tables are mirrored by design.<br>
-- The duplicate GeoJSON shift block (its own dropdown, distance input and pad in the GeoJSON card) has been removed. <code>shiftGeoJsonLayer()</code> and <code>resetGeoJsonShift()</code> now take the layer name and distance as arguments instead of reading their own dropdown.<br>
-- The applied-shift line reports both kinds in metres: GeoJSON offsets are stored in degrees and are converted back for display (<code>describeGeoJsonOffset()</code>).<br>
-- The transparency slider is WMS-only, so it now disables itself when a GeoJSON layer is selected instead of silently doing nothing.<br>
-- The GeoJSON card keeps the ward picker, label colour/size and Load/Clear, plus a hint that loaded layers are shifted from the Shifting tab.<br><br>
-2026.09.13.018
-<strong>Fixed:</strong><br>
-- The info-popup title bar (the green <code>tr.alert-success</code> heading) was unreadable: the background was a translucent green (<code>rgba(40, 167, 69, 0.25)</code>) while the text inherited the theme colour, so it rendered green on green. It is now a solid <code>#8BC34A</code> bar with dark (<code>#1b1b1b</code>) bold text, which keeps a readable contrast in both the light and the dark editor theme. Applied to both popup builders (<code>showWMSPopupAtPixel</code> and <code>showWMSPopupAtPixelForLayer</code>).<br><br>
-2026.09.13.017
-<strong>UI:</strong><br>
-- The sidebar panel is now split into sub-tabs below the gradient header: <em>Layers</em>, <em>Shifting</em> and <em>Settings</em>, built with the new shared <code>npwTabs()</code> helper (segmented control, ARIA <code>tablist</code>/<code>tab</code>/<code>tabpanel</code> roles).<br>
-- <em>Layers</em> holds everything it showed before: the collapsible layer-group cards (opacity slider + checkbox per layer) and the GeoJSON loader card. <em>Shifting</em> holds the Layer tools card (layer select, transparency, shift distance, 3x3 pad, reset, applied-shift status). <em>Settings</em> is a placeholder for options added later.<br>
-- The selected sub-tab is remembered in <code>localStorage</code> (<code>_wme_nepali_wms_subtab</code>), so a reload returns to the tab that was last open.<br>
-<strong>Fixed:</strong><br>
-- Layer-row checkboxes sat out of line with their labels: WME's global <code>input[type=checkbox]</code> rule outranks a plain class, so its size/margins won. The checkbox and label are now targeted as <code>.npw-layer-item &gt; input.npw-checkbox</code> / <code>&gt; label.npw-label</code> with a pinned 14x14 box and a centred label.<br><br>
-2026.09.13.016
-<strong>Added:</strong><br>
-- WMS layers can now start from a corrected position: <code>WMS_LAYER_SHIFT_PRESETS</code> holds a built-in default shift per layer, applied <em>before the first tile is drawn</em>, so e.g. the inaccurate DMG municipality border no longer has to be nudged into place by hand (no 260 clicks after every reload). Values are written the way they are measured on the map: <code>{ west: 260, north: 20 }</code> = pull the layer 260 m west and 20 m north. Currently set for the DMG municipality border.<br>
-- A shift made by hand with the pad is now remembered per layer (stored in metres, so it is projection-independent) and re-applied on the next page load. <em>Reset Shift</em> returns to the layer's built-in default instead of an unshifted position.<br>
-- The Layer tools card shows the shift currently applied to the selected layer, e.g. <em>Applied shift: 260 m W, 20 m N (built-in default)</em> / <em>(remembered)</em> - the value can be copied straight into the preset table.<br><br>
-2026.09.13.015
-<strong>UI:</strong><br>
-- The layer-group cards (NP Places, NP Roads, ...) can now be collapsed and expanded by clicking their title bar (keyboard: Enter/Space). The folded state is remembered per group, so a collapsed "NP Places" stays collapsed after a page reload.<br>
-- Each group title shows an <em>on/total</em> badge (e.g. <code>2/12</code>) that stays visible while the group is collapsed, and `npwCard()` now takes an optional <code>{ collapsible, storageKey }</code> so the provider cards planned next (Django, etc.) get the same behaviour for free.<br><br>
-2026.09.13.014
-<strong>UI:</strong><br>
-- Buttons modernised to the "WME GeoFile" (WME-NP-GIS-Layers) look: full-width solid button, 6px radius, 600 weight, coloured hover, using the same palette (green = load/import, red = clear/remove, blue = neutral, crimson = accent).<br>
-- Load / Clear are now one two-button row, and each shift pad has a full-width <em>Reset Shift</em> button under the 3x3 arrow grid instead of a small inline one.<br>
-- The button factory, palette and row helper are shared (<code>npwButton()</code>, <code>npwButtonRow()</code>, <code>NPW_BUTTON_VARIANTS</code>) so the provider sections planned next (Django, etc.) can reuse the same layout and colours.<br><br>
-2026.09.13.013
-<strong>Fixed:</strong><br>
-- GeoJSON layer shift direction: only up/down moved the layer the way the arrow points; <em>left/right and the four diagonals were mirrored horizontally</em>. The horizontal component of the shift is now negated so every arrow moves the layer in the direction it points (vertical was already correct).<br><br>
-2026.09.13.012
-<strong>SDK migration (GeoJSON layers):</strong><br>
-- The LMC ward GeoJSON layers are now WME SDK feature layers: <code>Map.addLayer</code> with <code>styleRules</code>/<code>styleContext</code> + <code>dangerouslyAddFeaturesToLayerWithoutValidation</code>, <code>setLayerVisibility</code>, <code>setLayerZIndex</code>, <code>redrawLayer</code>, <code>removeAllFeaturesFromLayer</code> and <code>removeLayer</code> replace <code>OL.Format.GeoJSON</code>, <code>OL.Layer.Vector</code>, <code>OL.StyleMap</code> and the OL2 layer calls.<br>
-- Every feature now gets the <code>id</code> the SDK requires (<code>&lt;layerName&gt;_&lt;index&gt;</code>), and the label is built from the feature properties instead of OL2 <code>attributes</code>.<br>
-- The label colour/size inputs now update the loaded building layers immediately (<code>redrawLayer</code> re-runs the styleContext getters) instead of only affecting newly loaded wards.<br>
-- Shifting no longer uses OL2 <code>geometry.move()</code>: coordinates are translated in WGS84 degrees and the layer is re-added. The metres-to-degrees conversion now always applies, because SDK features are stored in WGS84 regardless of the map projection.<br><br>
-2026.09.13.011
-<strong>Fixed:</strong><br>
-- <code>W.map.getCenter()</code> is no longer read blindly: the WMS and GeoJSON shift maths asked for <code>.lat</code> even when the map had no centre yet (TypeError). Both now use <code>getMapCenterLat()</code>, which falls back to the OL2 map centre and finally to Nepal's latitude.<br><br>
-2026.09.13.010
-<strong>Changed:</strong><br>
-- Switching a layer off now detaches it from the map again instead of only hiding it, so an off layer keeps no hidden tile grid in memory. The detach is guarded - only layers that are actually attached to the map are removed and a failed detach can no longer break the toggle, which is what caused the <code>NotFoundError: removeChild</code> in 2026.09.13.007.<br>
-- The Street View overlay cleanup detaches the layer the same way.<br><br>
-2026.09.13.009
-<strong>Changed:</strong><br>
-- Layers are no longer detached from the map: a layer is attached on demand and then only switched with <code>setVisibility()</code>, the way "Croatian WMS layers" does it. <code>W.map.removeLayer()</code> is no longer called anywhere for WMS/XYZ layers, so the <code>NotFoundError: removeChild</code> class of failure cannot occur at all.<br>
-- Side effect: a layer that has been enabled once stays in the map's layer list after being switched off (it no longer disappears from the "Layer tools" drop-down), and re-enabling it is instant.<br><br>
-2026.09.13.008
-<strong>Fixed:</strong><br>
-- <code>NotFoundError: Failed to execute 'removeChild' on 'Node'</code> when switching a layer off. WME's <code>removeLayer()</code> detaches the layer <code>&lt;div&gt;</code> unconditionally, so it was being called for layers that were never added to the map (e.g. on start-up and when the master checkbox was off). Layers are now detached only when they are actually on the map, and hiding relies on <code>setVisibility(false)</code> alone.<br>
-- Same guard applied to the Street View overlay cleanup.<br><br>
-2026.09.13.007
-<strong>UI:</strong><br>
-- Sidebar tab rebuilt on the "Croatian WMS layers" pattern: gradient header (title + version), one card per layer group with a per-group <strong>opacity slider</strong> and one checkbox per layer, plus theme-aware controls.<br>
-- The WME layer switcher now holds a <strong>single master checkbox</strong> for the script instead of one checkbox per layer; a layer is drawn only when its sidebar checkbox <em>and</em> the master checkbox are on. The master state is remembered.<br>
-- Panel and both WMS popups are now themed with WME CSS variables (<code>--content_default</code>, <code>--background_default</code>, <code>--hairline</code>, <code>--primary</code>, <code>--content_p1/p2</code>), so they follow the editor's light/dark theme instead of hard-coded colours.<br><br>
-2026.09.13.006
-<strong>SDK migration:</strong><br>
-- Layer switcher rebuilt on <code>wmeSDK.LayerSwitcher</code> (addLayerCheckbox / setLayerCheckboxChecked / isLayerCheckboxChecked + the <code>wme-layer-checkbox-toggled</code> event) instead of hand-made shadow-DOM <code>wz-checkbox</code> elements. Saved states are preserved; the group names are kept as label prefixes since the SDK has no group API.<br>
-- Street View overlay is now driven by the SDK street view events (<code>wme-street-view-button-activated/deactivated</code>, <code>wme-street-view-panel-visibility-changed</code>) and <code>Map.isStreetViewActive()</code>, replacing the MutationObserver on <code>.street-view-control</code>.<br><br>
-2026.09.13.005
-<strong>SDK migration:</strong><br>
-- Bootstrap now waits on <code>wmeSDK.Events.once('wme-map-data-loaded')</code> instead of a DOM event listener.<br>
-- WMS info popups are positioned with the SDK screen-pixel API and are clamped to stay inside the viewport (no more page distortion at the map edges).<br>
-- Keyboard shortcuts migrated from <code>W.accelerators</code>/<code>I18n</code> to the WME SDK (<code>wmeSDK.Shortcuts</code>), with automatic migration of previously assigned legacy keys.<br><br>
-2026.05.20.10
-<strong>Added HNs:</strong><br>- Dhangadhi Sub Metropolitan City <br>- Ghodaghodi Municipality <br>- Nepalgunj Sub Metropolitan City<br><br>
-2026.05.20.09
-- Fixed issue where script fails to load. 
-- Most of the code is currently using WMESDK and its equivalent APIs. 
-2026-04-16.1
-<strong>Fixed:</strong><br> - Compability with latest WME version.<br><br> - swapped W.map.olMap with W.map.getOLMap() to fix layers not showing up issue. <br><br> Thanks to davidsl4 to pointing out.
-2026.02.06.06
-- Added Preeti font to Unicode conversion for rd_nanep field
-- Building labels now display Nepali text in proper Unicode format
-2026.02.06.01
-- Added feature: Load GeoJSON from URL (LMC Ward Buildings from geonep.com.np)
-- New UI section to select ward number (1-29) and load building data
-- Buildings display with house numbers as labels
-- Clear button to remove all loaded GeoJSON layers
-2025.11.29.01
-- Added layers: Health Facilities from National Geoportal, Police Units from National Geoportal.
-2025.08.30.01
-- ZIndex update for : Education Facilities (PRTMP),<br> Health Facilities (PRTMP),<br> Palika Centre (PRTMP),<br> Ward Centre (PRTMP),<br> Tourist Attraction,<br> Customs Office <br> Bridges (BSM),<br> Bridges (PRTMP),<br> and Lalitpur Metropolitan City (LMC) layers.
-version: 2025.07.27.1 - Added Layers:
-  - Rivers
-  - Education Facilities (PRTMP)
-  - Health Facilities (PRTMP)
-  - Palika Centre (PRTMP)
-  - Ward Centre (PRTMP)
-  - Tourist Attraction
-  - Customs Office
-  - National Highways 2023
-  - Province Highways 2023
-  - Province Roads 2023
-  - Bridges (BSM)
-  - Bridges (PRTMP)
-  - and popup support for above layers and more.
-version: 2025.07.24.01 - It now supports to display popup for highway with various information.
-version: 2025.06.23.01 - Added diagonal (↖, ↗, ↙, ↘) shift buttons for WMS layers.
-                       - Shows alert when the shift is reset to default.
-version: 2025.06.08.01 - Now the WMS layer can be shifted by a specified distance in meters.
-Version: 2025.06.06.02 - Added Bridge Management System bridge locations!
-                       - Loaded layers will be reloaded even after the page refresh.
-Version: 2025.06.06.01 - Added Bridge Management System bridge locations!
-version: 2025.05.11.01 - Fixed Z-ordering
-version: 2025.04.13.01 - Fixed Combatible with the latest wme beta v2.287-5! Now it monitors the script update!
-version: 2025.03.06.01 - Now LMC HN can be filtered by ward
-version: 2025.02.03.01 - Line modification
-version: 2025.02.01.02 - Added support for WazeToastr update dialogue box
-version: 2025.02.01.01 - Modified how WMS 4326 image is displayed
-version: "1.0", message: "Initial Version"
-
-*/
+   * The version history used to live here as a ~350-line comment block. It now lives in
+   * CHANGELOG.md next to this script - nothing read it at runtime, and the update dialog
+   * is driven by @version, not by that text.
+   */
 })();
