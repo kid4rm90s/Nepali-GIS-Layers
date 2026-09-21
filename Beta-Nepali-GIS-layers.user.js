@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.20.025
+// @version       2026.09.21.001
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -6908,6 +6908,10 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       return false;
     }
     var block = view.querySelector('.alt-streets-control');
+    // Already exactly where it belongs: touch nothing. `insertBefore` on a node that is
+    // already in position still counts as a childList mutation for the observer watching
+    // this panel, and that is what made the card strobe while the pointer was over it.
+    if (block ? card.nextElementSibling === block : view.lastElementChild === card) return true;
     if (block) view.insertBefore(card, block);
     else view.appendChild(card);
     return true;
@@ -7116,39 +7120,72 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     }
     var fullAddress = parts.filter(Boolean).join(', ');
 
-    // Rebuilt rather than updated: WME re-renders this panel on its own schedule, and a
-    // fresh node is the only way to be sure the card is still attached.
-    postalRemoveAddressCard();
-
-    var card = npwCreate('div', 'npw-address-card');
-    card.id = POSTAL_ADDRESS_CARD_ID;
+    // The card is REUSED and refilled, never rebuilt: rebuilding tore the copy button out
+    // from under the pointer (so a click missed and the label flickered) and, because
+    // removing and re-adding the card is itself a childList mutation, fed the panel
+    // observer into scheduling the next rebuild.
+    var card = document.getElementById(POSTAL_ADDRESS_CARD_ID);
+    if (!card) {
+      card = npwCreate('div', 'npw-address-card');
+      card.id = POSTAL_ADDRESS_CARD_ID;
+    }
 
     // ONE compact row: a postal envelope icon, the address, and the copy button. The
     // ward/code detail is a tooltip rather than a line of its own, which is what keeps
     // the whole thing to a single line above the address inputs.
-    var row = npwCreate('div', 'npw-address-row');
-    // An icon instead of the word "Postal": less width, and it means the same thing in
-    // any editor language. Inline SVG (static markup, no data interpolated) so it
-    // inherits the accent colour through currentColor - an emoji would not.
-    var icon = npwCreate('span', 'npw-address-icon');
-    icon.title = 'Postal address';
-    icon.setAttribute('aria-hidden', 'true');
-    icon.innerHTML =
-      '<svg viewBox="0 0 16 16" width="13" height="13" focusable="false">' +
-      '<rect x="1.4" y="3.4" width="13.2" height="9.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
-      '<path d="M2 4.3 8 8.6l6-4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
-      '</svg>';
-    row.appendChild(icon);
-    row.appendChild(npwCreate('span', 'npw-address-value', fullAddress));
-    var copyBtn = npwButton(null, 'Copy', 'Copy this address to the clipboard', 'primary', 'npw-address-copy');
-    row.appendChild(copyBtn);
-    card.appendChild(row);
+    var row = card.querySelector('.npw-address-row');
+    if (row) {
+      // Only the text is written - the row and its button stay exactly where they are.
+      row.querySelector('.npw-address-value').textContent = fullAddress;
+    } else {
+      row = npwCreate('div', 'npw-address-row');
+      // An icon instead of the word "Postal": less width, and it means the same thing in
+      // any editor language. Inline SVG (static markup, no data interpolated) so it
+      // inherits the accent colour through currentColor - an emoji would not.
+      var icon = npwCreate('span', 'npw-address-icon');
+      icon.title = 'Postal address';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML =
+        '<svg viewBox="0 0 16 16" width="13" height="13" focusable="false">' +
+        '<rect x="1.4" y="3.4" width="13.2" height="9.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+        '<path d="M2 4.3 8 8.6l6-4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+        '</svg>';
+      row.appendChild(icon);
+      row.appendChild(npwCreate('span', 'npw-address-value', fullAddress));
+      var copyBtn = npwButton(null, 'Copy', 'Copy this address to the clipboard', 'primary', 'npw-address-copy');
+      row.appendChild(copyBtn);
+      card.appendChild(row);
+      // Bound once, on the node that now outlives every refill. The text is read from the
+      // card at click time rather than closed over, so it can never copy a stale address.
+      copyBtn.addEventListener('click', function () {
+        var value = card.querySelector('.npw-address-value');
+        value = value ? value.textContent : '';
+        if (!value) return;
+        navigator.clipboard.writeText(value).then(function () {
+          copyBtn.textContent = 'Copied';
+          setTimeout(function () {
+            // Only restore the face of a button still showing this result, so a slow copy
+            // cannot overwrite the label of a card that has since been refilled.
+            if (copyBtn.textContent === 'Copied') copyBtn.textContent = 'Copy';
+          }, 1500);
+        }).catch(function (e) {
+          // writeText REJECTS rather than throws, so the catch belongs on the promise.
+          console.warn(scriptName + ': clipboard copy failed', e);
+        });
+      });
+    }
+    // Only the warning lines are rebuilt; the row above is left where it is.
+    card.querySelectorAll('.npw-address-warn').forEach(function (warn) {
+      warn.remove();
+    });
 
+    // The tooltip is written only on a real change: reassigning title on the card under the
+    // pointer re-opens its tooltip, which reads as a flicker even though nothing moved.
+    var tooltip = '';
     if (properties && properties.postal_code) {
       var stateLabel = postalStateNameOf(properties) || properties.postal_state || '';
-      card.title =
-        target.kind === 'venue' ? 'Place — ' : '';
-      card.title +=
+      tooltip =
+        (target.kind === 'venue' ? 'Place — ' : '') +
         'Ward ' +
         (properties.ex_new_ward_n !== undefined && properties.ex_new_ward_n !== null
           ? properties.ex_new_ward_n
@@ -7172,6 +7209,7 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
         )
       );
     }
+    if (card.title !== tooltip) card.title = tooltip;
 
     // The Waze city is reported as a CHECK against the sheet, and never decides the code.
     // Both values were already read above; only the sub-city DECISION is shared, and the
@@ -7189,18 +7227,6 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
 
     // Inside the address view for either panel type - see postalPlaceAddressCard.
     postalPlaceAddressCard(card);
-
-    copyBtn.addEventListener('click', function () {
-      try {
-        navigator.clipboard.writeText(fullAddress);
-        copyBtn.textContent = 'Copied';
-        setTimeout(function () {
-          copyBtn.textContent = 'Copy';
-        }, 1500);
-      } catch (e) {
-        console.warn(scriptName + ': clipboard copy failed', e);
-      }
-    });
   }
 
   // The edit panel is rendered asynchronously after the selection event, so every pass
