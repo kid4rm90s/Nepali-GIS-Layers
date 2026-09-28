@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.28.002
+// @version       2026.09.28.003
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -26,6 +26,7 @@
 // @connect       docs.google.com
 // @require       https://update.greasyfork.org/scripts/597539/WME%20Key%20Codes.js
 // @connect       githubusercontent.com
+// @connect       raw.githubusercontent.com
 // @downloadURL   https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js
 // @updateURL   https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js
 
@@ -95,6 +96,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     subTab: '_wme_nepali_wms_subtab',            // bare tab id (string)
     layerOffsets: '_wme_nepali_wms_layer_offsets', // { layerName: { east, north } } in metres
     postal: '_wme_nepali_wms_postal',            // { wardCodes, autoLoad, subCity, provinceSuffix }
+    closures: '_wme_nepali_wms_closures',        // { enabled: boolean }
     layerTogglers: 'WMSLayers',                  // { togglerKey: boolean } - pre-existing key
   };
 
@@ -2631,6 +2633,340 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     }
   }
 
+  /* ------------------------------------------------------------------
+     "DoR Road Closures (CLOSED)" - fully closed roads published by the
+     Department of Roads, drawn as map markers.
+
+     The feed is the flat { "<id>": record } object maintained by the
+     DoR-Navigate-Closure-History GitHub Action:
+       https://github.com/kid4rm90s/DoR-Navigate-Closure-History
+     Every record carries closure_type OPEN | PARTIAL_OPEN | CLOSED and the
+     closure's latitude/longitude as STRINGS.
+
+     Only "CLOSED" is drawn, which is what the card promises. The sibling
+     navigate_dor_feed.py maps that same field CLOSED -> red, PARTIAL -> yellow,
+     OPEN -> green, so widening this later is one predicate and one icon.
+
+     The layer is a plain SDK point layer and is deliberately kept OUT of
+     loadedGeoJSONLayers: that list feeds the Style Settings scope and
+     label-field pickers and the shift dropdown, none of which mean anything
+     for a read-only icon overlay.
+     ------------------------------------------------------------------ */
+  var CLOSURE_FEED_URL =
+    'https://raw.githubusercontent.com/kid4rm90s/DoR-Navigate-Closure-History/refs/heads/master/dor_closure_state.json';
+  var CLOSURE_LAYER_NAME = 'NP_DoR_Closures';
+  var CLOSURE_STORAGE_KEY = '_wme_nepali_wms_closures';
+  var CLOSURE_MIN_ZOOM = 8;             // the markers are only drawn from this zoom up
+  var CLOSURE_FETCH_TIMEOUT_MS = 45000; // the whole-country feed, so allow longer than a manifest
+  var CLOSURE_REFRESH_MS = 60 * 60 * 1000; // re-fetch the feed once an hour
+
+  // The marker: a red "no entry" disc with a white bar. An inline SVG data URI needs no
+  // extra @connect, still renders when the network is down, and cannot be blocked by the
+  // page CSP - the same reason the WME SDK's own marker example uses one.
+  var CLOSURE_ICON =
+    'data:image/svg+xml;charset=utf-8,' +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+        '<circle cx="12" cy="12" r="10" fill="#c62828" stroke="#ffffff" stroke-width="2"/>' +
+        '<rect x="6.5" y="10.4" width="11" height="3.2" rx="1.2" fill="#ffffff"/>' +
+        '</svg>'
+    );
+
+  var closureEnabled = false;      // the card's master switch (persisted)
+  var closureFeed = null;          // { features, records } once fetched, reused on re-enable
+  var closureFetchPromise = null;  // the in-flight fetch, so two triggers share one request
+  var closureLayerBuilt = false;
+  var closureLastUpdated = 0;      // timestamp of the last successful fetch
+  var closureRefreshTimer = null;  // the hourly auto-refresh
+
+  function loadClosureState() {
+    var saved = npwLoadJson(CLOSURE_STORAGE_KEY, {});
+    closureEnabled = !!saved.enabled;
+  }
+
+  function saveClosureState() {
+    npwSaveJson(CLOSURE_STORAGE_KEY, { enabled: closureEnabled });
+  }
+
+  function setClosureStatus(text) {
+    var element = document.getElementById('closureStatus');
+    if (element) element.textContent = text;
+  }
+
+  /** One-line hover tooltip: "NH17 - Landslide - Dhading". */
+  function closureTooltip(record) {
+    return [record.road_refno, record.closure_reason, record.district]
+      .map(function (part) {
+        return part === null || part === undefined ? '' : String(part).trim();
+      })
+      .filter(Boolean)
+      .join(' - ');
+  }
+
+  // Escapes a value for the popup's innerHTML. The feed carries free text typed by road
+  // project staff (Nepali remarks, contact lists), so a value must never be interpolated
+  // raw - this is the one place in the feed where markup could come back out.
+  function escapeHtml(value) {
+    return String(value === null || value === undefined ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  /** The detail table of one closure, in the same shape the WMS popup uses. */
+  function closurePopupHtml(record) {
+    var rows = [
+      ['Road', [record.road_refno, record.road_name].filter(Boolean).join(' \u2014 ')],
+      ['Status', record.closure_type],
+      ['Reason', record.closure_reason],
+      ['District', record.district],
+      ['Division', record.division],
+      ['Location', record.location],
+      ['Link code', record.link_code],
+      ['Chainage', [record.chainage, record.end_chainage].filter(Boolean).join(' - ')],
+      ['Blocked from', record.date_roadblock_start],
+      ['Reopen (estimated)', record.date_roadblock_end_estimated],
+      ['Reopened', record.date_roadblock_end],
+      ['Repair ETA', record.repair_eta],
+      ['Efforts being made', record.efforts_being_made],
+      ['Remarks', record.remarks],
+      ['Contact', record.contact_person],
+      ['Reported by', record.last_updated_by_user_name || record.created_by_user_name],
+    ];
+    var html = '<table><tbody><tr class="alert-success"><th colspan="2">Road closed</th></tr>';
+    rows.forEach(function (row) {
+      var value = row[1];
+      if (value === null || value === undefined || String(value).trim() === '') return;
+      html +=
+        '<tr><td>' + escapeHtml(row[0]) + '</td><td>' + escapeHtml(String(value).trim()) + '</td></tr>';
+    });
+    return html + '</tbody></table>';
+  }
+
+  // Keeps every record whose closure_type is exactly "CLOSED" and whose coordinate is
+  // usable. The feed's latitude/longitude are strings, so they are converted here; a
+  // record with a blank, non-numeric or out-of-range value is dropped rather than placed
+  // at 0,0, which would put a phantom closure in the Gulf of Guinea.
+  // @returns {{features: Array, records: Map}} the SDK features and featureId -> record.
+  function buildClosureFeatures(feed) {
+    var features = [];
+    var records = new Map();
+    var skipped = 0;
+
+    var addRecord = function (record) {
+      if (!record || typeof record !== 'object') return;
+      if (String(record.closure_type || '').trim().toUpperCase() !== 'CLOSED') return;
+
+      var lon = Number(record.longitude);
+      var lat = Number(record.latitude);
+      var usable = isFinite(lon) && isFinite(lat) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+      if (!usable || (lat === 0 && lon === 0)) {
+        skipped++;
+        return;
+      }
+
+      var featureId = 'DoR_closure_' + record.id;
+      records.set(featureId, record);
+      features.push({
+        id: featureId,
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [lon, lat] },
+        // Only what the style context and the popup lookup need: the whole record stays in
+        // `records`, so nothing large is copied per marker.
+        properties: { closureId: String(record.id), title: closureTooltip(record) },
+      });
+    };
+
+    if (Array.isArray(feed)) {
+      feed.forEach(addRecord);
+    } else if (feed && typeof feed === 'object') {
+      Object.keys(feed).forEach(function (key) {
+        addRecord(feed[key]);
+      });
+    }
+
+    if (skipped > 0) {
+      console.warn(scriptName + ': ' + skipped + ' CLOSED closure(s) skipped - no usable latitude/longitude.');
+    }
+    return { features: features, records: records };
+  }
+
+  /** Downloads the feed and turns it into features. One request per call. */
+  function fetchClosureFeed() {
+    return npGisFetchText(CLOSURE_FEED_URL, CLOSURE_FETCH_TIMEOUT_MS).then(function (text) {
+      return buildClosureFeatures(JSON.parse(text));
+    });
+  }
+
+  // The record behind a clicked closure feature, or null when the click was not on one of
+  // ours. The coordinate is validated here too, because the popup is anchored to it.
+  function closureRecordForFeature(featureId) {
+    if (!closureFeed || !closureFeed.records) return null;
+    var record = closureFeed.records.get(String(featureId));
+    if (!record) return null;
+    var lon = Number(record.longitude);
+    var lat = Number(record.latitude);
+    return isFinite(lon) && isFinite(lat) ? record : null;
+  }
+
+  /** Creates the marker layer and puts the features on it. */
+  function buildClosureLayer(features) {
+    wmeSDK.Map.addLayer({
+      layerName: CLOSURE_LAYER_NAME,
+      zIndexing: true,
+      styleContext: {
+        // The SDK's native hover tooltip. The key is deliberately not named after a
+        // FeatureStyle property, so it can only ever be read through ${hoverTitle}.
+        hoverTitle: function (context) {
+          var properties = (context && context.feature && context.feature.properties) || {};
+          return properties.title || 'Road closure';
+        },
+      },
+      styleRules: [
+        {
+          style: {
+            externalGraphic: CLOSURE_ICON,
+            graphicWidth: 24,
+            graphicHeight: 24,
+            graphicOpacity: 1,
+            cursor: 'pointer',
+            title: '${hoverTitle}',
+          },
+        },
+        {
+          // The zoom gate. `display` is the one FeatureStyle value that removes a
+          // symbolizer entirely, so the markers simply stop being drawn below
+          // CLOSURE_MIN_ZOOM - no feature is added or removed while panning.
+          predicate: function (properties, zoomLevel) {
+            return zoomLevel < CLOSURE_MIN_ZOOM;
+          },
+          style: { display: 'none' },
+        },
+      ],
+    });
+
+    if (features.length > 0) {
+      wmeSDK.Map.dangerouslyAddFeaturesToLayerWithoutValidation({ features: features, layerName: CLOSURE_LAYER_NAME });
+    }
+    wmeSDK.Map.setLayerZIndex({ layerName: CLOSURE_LAYER_NAME, zIndex: ZIndexes.popup + 20 });
+    wmeSDK.Map.setLayerVisibility({ layerName: CLOSURE_LAYER_NAME, visibility: !!masterLayerToggleOn });
+    // Turns on wme-layer-feature-clicked / -mouse-enter / -mouse-leave for this layer only.
+    wmeSDK.Events.trackLayerEvents({ layerName: CLOSURE_LAYER_NAME });
+    closureLayerBuilt = true;
+  }
+
+  function removeClosureLayer() {
+    if (!closureLayerBuilt) return;
+    try {
+      wmeSDK.Events.stopLayerEventsTracking({ layerName: CLOSURE_LAYER_NAME });
+    } catch (e) {
+      // never tracked - nothing to stop
+    }
+    try {
+      wmeSDK.Map.removeAllFeaturesFromLayer({ layerName: CLOSURE_LAYER_NAME });
+    } catch (e) {
+      // already empty
+    }
+    try {
+      wmeSDK.Map.removeLayer({ layerName: CLOSURE_LAYER_NAME });
+    } catch (e) {
+      if (!(wmeSDK.Errors && e instanceof wmeSDK.Errors.InvalidStateError)) {
+        console.warn(scriptName + ': could not remove the closure layer', e);
+      }
+    }
+    closureLayerBuilt = false;
+  }
+
+  // The closure layer also follows the script's master layer-switcher checkbox, so that
+  // one checkbox keeps owning every layer the script draws.
+  function syncClosureLayerVisibility() {
+    if (!closureLayerBuilt) return;
+    wmeSDK.Map.setLayerVisibility({
+      layerName: CLOSURE_LAYER_NAME,
+      visibility: !!closureEnabled && !!masterLayerToggleOn,
+    });
+  }
+
+  function closureCountText() {
+    if (!closureFeed) return 'not loaded';
+    return closureFeed.features.length + ' CLOSED closure' + (closureFeed.features.length === 1 ? '' : 's');
+  }
+
+  /** "Showing 42 CLOSED closures - visible from zoom 8 - updated 14:05". */
+  function closureShowingText() {
+    var text = 'Showing ' + closureCountText() + ' - visible from zoom ' + CLOSURE_MIN_ZOOM;
+    if (!closureLastUpdated) return text;
+    var when = new Date(closureLastUpdated);
+    return (
+      text +
+      ' - updated ' +
+      String(when.getHours()).padStart(2, '0') +
+      ':' +
+      String(when.getMinutes()).padStart(2, '0')
+    );
+  }
+
+  // Re-fetches the feed once an hour, but only while the layer is switched on: with the
+  // card off nothing on screen would change, so no request is made. The interval is never
+  // cleared - it is one timer for the life of the page, and the check is what gates it.
+  function startClosureFeedRefresh() {
+    if (closureRefreshTimer) return;
+    closureRefreshTimer = setInterval(function () {
+      if (closureEnabled) refreshClosureData();
+    }, CLOSURE_REFRESH_MS);
+  }
+
+  // Shows or hides the markers. The feed is fetched once and kept, so switching the layer
+  // off and on again costs no request - the card's Refresh button is the explicit re-fetch.
+  function setClosureLayerEnabled(enabled) {
+    closureEnabled = !!enabled;
+    saveClosureState();
+
+    if (!closureEnabled) {
+      removeClosureLayer();
+      setClosureStatus('Hidden' + (closureFeed ? ' - ' + closureCountText() + ' kept' : ''));
+      return;
+    }
+
+    if (closureFeed) {
+      buildClosureLayer(closureFeed.features);
+      setClosureStatus(closureShowingText());
+      return;
+    }
+    refreshClosureData();
+  }
+
+  /** Fetches the feed and rebuilds the layer when the switch is on. */
+  function refreshClosureData() {
+    if (closureFetchPromise) return closureFetchPromise; // one request, however many triggers
+    setClosureStatus('Loading closures\u2026');
+    closureFetchPromise = fetchClosureFeed()
+      .then(function (data) {
+        closureFeed = data;
+        closureLastUpdated = Date.now();
+        if (!closureEnabled) return;
+        removeClosureLayer();
+        buildClosureLayer(data.features);
+        setClosureStatus(closureShowingText());
+      })
+      .catch(function (e) {
+        var message = e && e.message ? e.message : String(e);
+        setClosureStatus('Could not load the closure feed: ' + message);
+        console.warn(scriptName + ': could not load the DoR closure feed', e);
+        try {
+          WazeToastr.Alerts.warning(scriptName, 'Could not load the DoR road-closure feed.', false, false, 5000);
+        } catch (warnError) {
+          // WazeToastr not ready - the status line above already carries the failure.
+        }
+      })
+      .then(function () {
+        closureFetchPromise = null;
+      });
+    return closureFetchPromise;
+  }
+
   function findGeoJsonLayer(layerName) {
     for (var i = 0; i < loadedGeoJSONLayers.length; i++) {
       if (loadedGeoJSONLayers[i].name === layerName) return loadedGeoJSONLayers[i];
@@ -2824,6 +3160,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       loadLmcAutoState();
       loadNpGisState();
       loadPostalState();
+      loadClosureState();
 
       WMSLayersTechSource.tileSizeG = new OL.Size(512, 512);
     WMSLayersTechSource.resolutions = [
@@ -4850,6 +5187,63 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         clearNpGisLayers();
       });
 
+    // --- "DoR Road Closures (CLOSED)" - a read-only icon overlay of the fully closed roads
+    // the Department of Roads publishes. No viewport loading and no per-level zoom gates:
+    // the country's CLOSED closures are a few hundred points, so the feed is fetched once
+    // and drawn as one layer (see the closure section near findGeoJsonLayer).
+    var closureCard = npwCard(layersPane, 'DoR Road Closures (CLOSED)', {
+      collapsible: true,
+      storageKey: 'dor-closures',
+    });
+    closureCard.id = 'ClosureGroup';
+    var closureBody = closureCard.npwBody;
+
+    closureBody.appendChild(
+      npwCreate(
+        'div',
+        'npw-status',
+        'Roads the Department of Roads reports as fully closed (closure_type CLOSED), from the ' +
+          'navigate.dor.gov.np closure history. The markers appear from zoom ' +
+          CLOSURE_MIN_ZOOM +
+          ' upwards, so zoom in until they show, and click one for its details.'
+      )
+    );
+
+    var closureRow = npwCreate('div', 'npw-layer-item');
+    var closureCheckbox = document.createElement('input');
+    closureCheckbox.type = 'checkbox';
+    closureCheckbox.className = 'npw-checkbox';
+    closureCheckbox.id = 'closureToggle';
+    closureCheckbox.checked = closureEnabled;
+    var closureLabel = npwCreate('label', 'npw-label', 'Show CLOSED road closures');
+    closureLabel.title = 'Draw a red marker on every road the DoR reports as fully closed';
+    // Deliberately no htmlFor: this click handler is the only toggle path, so clicking the
+    // label cannot double-toggle the checkbox (same pattern as the other cards).
+    closureLabel.addEventListener('click', function () {
+      closureCheckbox.checked = !closureCheckbox.checked;
+      closureCheckbox.dispatchEvent(new Event('change'));
+    });
+    closureRow.appendChild(closureCheckbox);
+    closureRow.appendChild(closureLabel);
+    closureBody.appendChild(closureRow);
+
+    closureCheckbox.addEventListener('change', function () {
+      setClosureLayerEnabled(closureCheckbox.checked);
+    });
+
+    var closureStatus = npwCreate('div', 'npw-status', closureEnabled ? 'Loading closures\u2026' : 'Hidden');
+    closureStatus.id = 'closureStatus';
+    closureBody.appendChild(closureStatus);
+
+    npwButton(closureBody, 'Load / Refresh closures', 'Fetch the DoR closure feed again', 'primary')
+      .addEventListener('click', function () {
+        refreshClosureData();
+      });
+
+    // First draw, from the saved switch, and the hourly auto-refresh.
+    startClosureFeedRefresh();
+    if (closureEnabled) refreshClosureData();
+
     fillWMSLayersSelectList();
     syncOpacityControlToSelection();
     refreshWmsShiftStatus();
@@ -4895,6 +5289,22 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         scheduleFeatureWindowUpdate();
         // ...and which ward the selected segment now sits in.
         postalScheduleAddressCard();
+      },
+    });
+
+    // --- DoR closures: click a marker for the closure's details. The SDK reports only the
+    // feature id, so the record is looked up in the map built alongside the features -
+    // which is also where the coordinates the popup is anchored to come from.
+    wmeSDK.Events.on({
+      eventName: 'wme-layer-feature-clicked',
+      eventHandler: function (evt) {
+        if (!evt || evt.layerName !== CLOSURE_LAYER_NAME) return;
+        var record = closureRecordForFeature(evt.featureId);
+        if (!record) return;
+        showWMSPopupAtPixel(
+          { lon: Number(record.longitude), lat: Number(record.latitude) },
+          closurePopupHtml(record)
+        );
       },
     });
   }
@@ -5646,6 +6056,8 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
 
   function syncAllTogglerVisibility() {
     for (var key in WMSLayerTogglers) syncTogglerVisibility(WMSLayerTogglers[key]);
+    // The closure markers are not a WMS toggler, but the master checkbox still owns them.
+    syncClosureLayerVisibility();
   }
 
   // State is persisted under the pre-existing "WMSLayers" key, so preferences saved by
