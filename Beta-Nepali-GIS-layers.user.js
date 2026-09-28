@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.21.001
+// @version       2026.09.28.001
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -24,6 +24,10 @@
 // @connect       gis.dmgnepal.gov.np
 // @connect       kid4rm90s.github.io
 // @connect       docs.google.com
+// @require       https://update.greasyfork.org/scripts/597539/WME%20Key%20Codes.js
+// @connect       githubusercontent.com
+// @downloadURL   https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js
+// @updateURL   https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js
 
 // ==/UserScript==
 
@@ -53,7 +57,8 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 '- <strong>Address and map fixes:</strong> the card no longer jumps to the top of the edit panel, Google place addresses are no longer shown (they are often wrong), and saved layer opacity is applied again after a reload instead of resetting.<br>';
   const scriptName = GM_info.script.name;
   const scriptVersion = GM_info.script.version;
-  const downloadUrl = 'https://greasyfork.org/scripts/521924-nepali-wms-layers/code/nepali-wms-layers.user.js';
+  const downloadUrl = 'https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js';
+  const forumURL = 'https://greasyfork.org/scripts/521924-nepali-gis-layers/feedback'
   let wmeSDK;
 
   var WMSLayersTechSource = {};
@@ -7433,8 +7438,15 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
 
     function scriptupdatemonitor() {
   if (WazeToastr?.Ready) {
-    // Create and start the ScriptUpdateMonitor
-    const updateMonitor = new WazeToastr.Alerts.ScriptUpdateMonitor(scriptName, scriptVersion, downloadUrl, GM_xmlhttpRequest);
+      // For GitHub raw URLs, we need to specify metaUrl explicitly (same as downloadUrl for GitHub)
+      const updateMonitor = new WazeToastr.Alerts.ScriptUpdateMonitor(
+        scriptName,
+        scriptVersion,
+        downloadUrl,
+        GM_xmlhttpRequest,
+        downloadUrl, // metaUrl - for GitHub, use the same URL as it contains the @version tag
+        /@version\s+(.+)/i, // metaRegExp - extracts version from @version tag
+      );
 
     // Check immediately on page load, then every 2 hours
     updateMonitor.start(2, true); // checkImmediately = true
