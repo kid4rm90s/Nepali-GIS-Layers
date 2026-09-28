@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.28.001
+// @version       2026.09.28.002
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -42,6 +42,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 /* global OpenLayers */
 /* global require */
 /* global GeoKMLer */
+/* global WMEKeyCodes */
 
 (function main() {
   ('use strict');
@@ -184,82 +185,53 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   var _conflictStaleKeys = new Map();
   var _shortcutsSyncTimer = null;
 
-  // --- Key-code <-> SDK combo converters -----------------------------
-  // WME's own storage uses raw "modifiers,keycode" (e.g. "4,82" = Alt+R) while the
-  // SDK uses readable combos ("A+R"). Both formats show up in saved data, so every
-  // value is normalized to { raw, combo } before use.
-  var _KEYCODE_TO_CHAR = {
-    65: 'A', 66: 'B', 67: 'C', 68: 'D', 69: 'E', 70: 'F', 71: 'G', 72: 'H', 73: 'I', 74: 'J', 75: 'K', 76: 'L',
-    77: 'M', 78: 'N', 79: 'O', 80: 'P', 81: 'Q', 82: 'R', 83: 'S', 84: 'T', 85: 'U', 86: 'V', 87: 'W', 88: 'X',
-    89: 'Y', 90: 'Z',
-    48: '0', 49: '1', 50: '2', 51: '3', 52: '4', 53: '5', 54: '6', 55: '7', 56: '8', 57: '9',
-    112: 'F1', 113: 'F2', 114: 'F3', 115: 'F4', 116: 'F5', 117: 'F6',
-    118: 'F7', 119: 'F8', 120: 'F9', 121: 'F10', 122: 'F11', 123: 'F12',
-    32: 'Space', 13: 'Enter', 9: 'Tab', 27: 'Esc', 8: 'Backspace', 46: 'Delete',
-    36: 'Home', 35: 'End', 33: 'PageUp', 34: 'PageDown', 45: 'Insert',
-    37: '\u2190', 38: '\u2191', 39: '\u2192', 40: '\u2193',
-    188: ',', 190: '.', 191: '/', 186: ';', 222: "'", 219: '[', 221: ']', 220: '\\', 189: '-', 187: '=', 192: '',
-  };
+  // --- Key-code <-> SDK combo conversion (shared library) -------------
+  // The keyCode <-> key-name <-> shortcut-string tables live in the shared "WME Key
+  // Codes" library (@require above), so this script no longer carries its own copy of
+  // them. A local table that misses a key converts it to "no key", which silently
+  // unassigns the shortcut; the library returns null for anything it does not
+  // understand and covers the raw "modifierMask,keyCode" form WME actually stores.
+  var _KC = (typeof WMEKeyCodes !== 'undefined' && WMEKeyCodes)
+    || (typeof unsafeWindow !== 'undefined' && unsafeWindow.WMEKeyCodes)
+    || null;
 
-  var _CHAR_TO_KEYCODE = Object.fromEntries(
-    Object.entries(_KEYCODE_TO_CHAR).map(function (entry) {
-      return [entry[1].toUpperCase(), Number(entry[0])];
-    })
-  );
-
-  var _MOD_CHAR_TO_VAL = { C: 1, S: 2, A: 4 };
-
-  function _comboToRaw(str) {
-    if (!str || str === '' || str === '-1' || str === 'None') return null;
-    if (/^\d+,-?\d+$/.test(str)) {
-      var keyCodeRaw = parseInt(str.split(',')[1], 10);
-      return keyCodeRaw < 0 ? null : str;
+  if (!_KC) {
+    console.error(scriptName + ': WMEKeyCodes library NOT loaded - keyboard shortcuts are disabled. Check the @require URL or reinstall the script.');
+  } else {
+    // Prove the loaded copy actually converts - a stale or broken file served from the
+    // @require URL would otherwise only surface later as a shortcut that appears in
+    // WME's list but never fires.
+    var _kcProbe = _KC.normalize('Ctrl+Up');
+    if (_kcProbe.raw !== '1,38' || _kcProbe.combo !== 'C+\u2191') {
+      console.warn(scriptName + ': WMEKeyCodes self-check FAILED - "Ctrl+Up" gave ' + JSON.stringify(_kcProbe) + ', expected raw "1,38" / combo "C+\u2191". The @require URL may be serving an old or broken copy of the library.');
     }
-    // Legacy/bare numeric key code ("67" = 'C'). Only 2+ digits are key codes:
-    // the SDK reports single-digit keys as the CHARACTER ("8" = the '8' key).
-    if (/^\d{2,}$/.test(str)) return '0,' + str;
-
-    var upperStr = String(str).toUpperCase();
-    if (/^[A-Z0-9]$/.test(upperStr)) return '0,' + upperStr.charCodeAt(0);
-    if (_CHAR_TO_KEYCODE[upperStr] !== undefined) return '0,' + _CHAR_TO_KEYCODE[upperStr];
-
-    function modValueOf(mods) {
-      return mods.split('').reduce(function (acc, ch) {
-        return acc | (_MOD_CHAR_TO_VAL[ch] || 0);
-      }, 0);
-    }
-
-    var letterMatch = upperStr.match(/^([ACS]+)\+([A-Z0-9])$/);
-    if (letterMatch) return modValueOf(letterMatch[1]) + ',' + letterMatch[2].charCodeAt(0);
-
-    var numericMatch = upperStr.match(/^([ACS]+)\+(\d+)$/);
-    if (numericMatch) return modValueOf(numericMatch[1]) + ',' + numericMatch[2];
-
-    var specialMatch = upperStr.match(/^([ACS]+)\+(.+)$/);
-    if (specialMatch && _CHAR_TO_KEYCODE[specialMatch[2]] !== undefined) {
-      return modValueOf(specialMatch[1]) + ',' + _CHAR_TO_KEYCODE[specialMatch[2]];
-    }
-    return null;
   }
 
-  function _rawToCombo(str) {
-    var raw = _comboToRaw(str);
-    if (!raw) return null;
-    var parts = raw.split(',');
-    var modValue = parseInt(parts[0], 10);
-    var keyCode = parseInt(parts[1], 10);
-    var keyChar = _KEYCODE_TO_CHAR[keyCode] || String(keyCode);
-    var modifiers = '';
-    if (modValue & 1) modifiers += 'C';
-    if (modValue & 2) modifiers += 'S';
-    if (modValue & 4) modifiers += 'A';
-    return modifiers ? modifiers + '+' + keyChar : keyChar;
-  }
-
+  // Normalized persistence record: { raw, combo, keys }.
+  // raw = machine form ("1,38"), combo = display form ("C+\u2191"), keys = the exact
+  // string the SDK reported. The three spellings are not interchangeable, so
+  // _shortcutKeyCandidates() below turns a record into the ordered list to try.
   function _normalizeShortcut(value) {
-    var src = value && typeof value === 'object' ? value.raw ?? value.combo : value;
-    var raw = _comboToRaw(src);
-    return { raw: raw, combo: _rawToCombo(raw) };
+    return _KC ? _KC.normalize(value) : { raw: null, combo: null, keys: null };
+  }
+
+  // A genuine binding string, i.e. not one of the markers WME uses for "no key".
+  function _isAssignableKeyString(value) {
+    return typeof value === 'string' && value.trim() !== '' && !/^(-1|none|null|undefined)$/i.test(value.trim());
+  }
+
+  // WME's shortcut parser resolves a plain character ("G"), modifier+character
+  // ("A+R") and modifier+keyCode NUMBER ("C+32") - and nothing else. A key NAME or
+  // glyph ("C+\u2191", "S+PageUp") is stored verbatim, so the shortcut appears in WME
+  // Settings but no key binds. Which spellings to try, and in what order, is the shared
+  // library's job: it owns the tables that produced the combo, so it is the only place
+  // where "the combo we saved" and "the string WME will bind" stay consistent.
+  function _shortcutKeyCandidates(record) {
+    if (_KC && typeof _KC.comboCandidates === 'function') return _KC.comboCandidates(record);
+    if (_KC) {
+      console.warn(scriptName + ': WMEKeyCodes v' + _KC.VERSION + ' has no comboCandidates() - update the library, otherwise keys whose display form carries a key name (Ctrl+Up, PageUp, ...) cannot bind. Falling back to the saved spellings.');
+    }
+    return [record.combo, record.keys, record.raw].filter(_isAssignableKeyString);
   }
 
   // --- Persistence ---------------------------------------------------
@@ -288,6 +260,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   // survive the switch to the SDK. Legacy format: "<scriptName>KBS" holding
   // [{ "<shortcutString>": "<actionId>" }], where actionId was the layer key.
   function migrateLegacyShortcuts() {
+    if (!_KC) return; // no converter - never write null records over saved keys
     var legacyStoreKey = scriptName + LEGACY_SHORTCUTS_KEY_SUFFIX;
     var legacyRaw;
     try {
@@ -327,17 +300,58 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     }
   }
 
-  // Register every layer shortcut. Re-runs are safe: existing registrations are
-  // deleted first. A key already taken by WME or another script is preserved in
-  // storage and the shortcut is registered keyless, with a warning to resolve it.
+  /** Registers one shortcut with one candidate key string. Returns 'ok' | 'conflict' | 'error'. */
+  function registerShortcutWithKeys(def, keyString) {
+    if (wmeSDK.Shortcuts.isShortcutRegistered({ shortcutId: def.id })) {
+      try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: def.id }); } catch (e) { /* wasn't registered */ }
+    }
+    try {
+      wmeSDK.Shortcuts.createShortcut({
+        shortcutId: def.id,
+        description: def.description,
+        callback: def.callback,
+        shortcutKeys: keyString,
+      });
+      return 'ok';
+    } catch (error) {
+      if (String(error).indexOf('already in use') !== -1) return 'conflict';
+      console.error(scriptName + ': unable to create shortcut ' + def.id, error);
+      return 'error';
+    }
+  }
+
+  /** The key WME currently holds for one of our shortcuts (null when keyless). */
+  function registeredKeysFor(shortcutId) {
+    try {
+      var all = wmeSDK.Shortcuts.getAllShortcuts();
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].shortcutId === shortcutId) return all[i].shortcutKeys || null;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  // True when WME really stored a key after we asked for `keyString`. The SDK reports
+  // its own spelling, so compare canonically rather than by string equality. A non-null
+  // value we cannot canonicalise still counts as bound - overwriting a working binding
+  // would be worse than a stray log line.
+  function keyWasBound(shortcutId, keyString) {
+    var held = registeredKeysFor(shortcutId);
+    if (!held) return false;
+    if (!_KC) return true;
+    var want = _KC.toRaw(keyString);
+    var got = _KC.toRaw(held);
+    if (want === null || got === null) return true;
+    return got === want;
+  }
+
+  // Register every layer shortcut. Re-runs are safe: a shortcut that already holds the
+  // key we want is left untouched, otherwise it is deleted and recreated with the first
+  // candidate spelling that actually binds. A key already taken by WME or another script
+  // is preserved in storage and the shortcut is registered keyless, with a warning.
   function initializeSDKShortcuts() {
     if (!wmeSDK?.Shortcuts || sdkShortcutDefs.length === 0) return;
-
-    sdkShortcutDefs.forEach(function (def) {
-      if (wmeSDK.Shortcuts.isShortcutRegistered({ shortcutId: def.id })) {
-        wmeSDK.Shortcuts.deleteShortcut({ shortcutId: def.id });
-      }
-    });
+    if (!_KC) return; // nothing can be converted; never overwrite saved records with nulls
 
     var keys = loadShortcutKeys();
     sdkShortcutDefs.forEach(function (def) {
@@ -345,7 +359,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     });
 
     // Duplicate combos can survive from older data: keep the first occurrence,
-    // register the rest keyless (their saved key is preserved, never nulled).
+    // preserve (never null) the rest and register them keyless.
     var taken = {};
     var conflicts = [];
     sdkShortcutDefs.forEach(function (def) {
@@ -359,38 +373,81 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       }
     });
 
+    var boundCount = 0;
+    var keptCount = 0;
+    var unassignedCount = 0;
+    var blockedCount = 0;
+    var failedToBind = [];
+
     sdkShortcutDefs.forEach(function (def) {
-      var shortcutKeys = _conflictBlockedKeys.has(def.settingsKey) ? null : keys[def.settingsKey].combo;
-      try {
-        wmeSDK.Shortcuts.createShortcut({
-          shortcutId: def.id,
-          description: def.description,
-          callback: def.callback,
-          shortcutKeys: shortcutKeys,
-        });
-      } catch (e) {
-        if (String(e).indexOf('already in use') !== -1) {
-          if (!_conflictBlockedKeys.has(def.settingsKey)) {
-            _conflictBlockedKeys.add(def.settingsKey);
-            conflicts.push(def.description + ' (' + (keys[def.settingsKey].combo || 'key in use') + ')');
-          }
-          try {
-            wmeSDK.Shortcuts.createShortcut({
-              shortcutId: def.id,
-              description: def.description,
-              callback: def.callback,
-              shortcutKeys: null,
-            });
-          } catch (e2) {
-            console.error(scriptName + ': unable to register shortcut ' + def.id, e2);
-          }
-        } else {
-          console.error(scriptName + ': unable to register shortcut ' + def.id, e);
+      var saved = keys[def.settingsKey] || {};
+
+      // Keys we preserved but could not assign last time stay unassigned.
+      if (_conflictBlockedKeys.has(def.settingsKey)) {
+        registerShortcutWithKeys(def, null);
+        blockedCount++;
+        return;
+      }
+
+      // Already registered with the key we want? Leave it untouched - rewriting a
+      // working registration can only disturb WME's own shortcut bookkeeping.
+      if (_isAssignableKeyString(saved.combo) && wmeSDK.Shortcuts.isShortcutRegistered({ shortcutId: def.id })) {
+        var held = registeredKeysFor(def.id);
+        if (held && (_KC ? _KC.equals(held, saved.combo) : held === saved.combo)) {
+          keptCount++;
+          return;
         }
+      }
+
+      // WME does not document which spelling createShortcut() accepts, and they are NOT
+      // interchangeable: an unresolvable string silently registers a keyless shortcut,
+      // which is how a key ends up listed in WME Settings but never firing. The ordering
+      // comes from the shared library (see _shortcutKeyCandidates); whichever one works
+      // is confirmed by reading the key back from the SDK, not by trusting the call.
+      var candidates = _shortcutKeyCandidates(saved);
+      if (candidates.length === 0) {
+        registerShortcutWithKeys(def, null); // never assigned a key
+        unassignedCount++;
+        return;
+      }
+
+      var boundWith = null;
+      for (var c = 0; c < candidates.length && boundWith === null; c++) {
+        var outcome = registerShortcutWithKeys(def, candidates[c]);
+        if (outcome === 'conflict') {
+          // Key taken by WME or another script - preserve the saved value, register
+          // keyless, and block so the poll doesn't clobber it back.
+          _conflictBlockedKeys.add(def.settingsKey);
+          conflicts.push(def.description + ' (' + saved.combo + ')');
+          registerShortcutWithKeys(def, null);
+          break;
+        }
+        if (outcome === 'ok' && keyWasBound(def.id, candidates[c])) boundWith = candidates[c];
+      }
+
+      if (boundWith !== null) {
+        boundCount++;
+        // WME bound something other than the saved display form, i.e. the display form
+        // was not resolvable on its own (arrow keys, PageUp/PageDown, ...).
+        if (boundWith !== saved.combo) {
+          console.log(scriptName + ' [Shortcut] ' + def.settingsKey + ': display form ' + JSON.stringify(saved.combo) + ' did not bind, using ' + JSON.stringify(boundWith));
+        }
+      } else {
+        // Nothing bound. Register keyless so the shortcut still appears in WME's list,
+        // and leave the saved value intact so the next reload retries.
+        registerShortcutWithKeys(def, null);
+        failedToBind.push(def.settingsKey + ' (tried ' + JSON.stringify(candidates) + ', SDK reports ' + JSON.stringify(registeredKeysFor(def.id)) + ')');
       }
     });
 
     saveShortcutKeys(keys);
+
+    console.log(scriptName + ': shortcut keys registered: ' + boundCount + ' bound, ' + keptCount + ' left as-is, ' + unassignedCount + ' unassigned'
+      + (blockedCount > 0 ? ', ' + blockedCount + ' preserved (key in use)' : '')
+      + (failedToBind.length > 0 ? ', ' + failedToBind.length + ' FAILED' : ''));
+    if (failedToBind.length > 0) {
+      console.warn(scriptName + ': shortcuts whose saved key could not be bound:\n  ' + failedToBind.join('\n  '));
+    }
 
     if (conflicts.length > 0) {
       console.warn(scriptName + ': shortcut conflicts (no key assigned): ' + conflicts.join(', '));
@@ -406,14 +463,13 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         console.warn(scriptName + ': WazeToastr warning failed', e);
       }
     }
-    console.log(scriptName + ': ' + sdkShortcutDefs.length + ' SDK shortcuts initialized.');
   }
 
   // WME moves a key away from its previous owner when the user reassigns it, so the
   // SDK state is the source of truth. This syncs SDK -> localStorage for shortcuts
   // the user changed in WME Settings -> Keyboard Shortcuts.
   function checkSDKShortcutsChanged() {
-    if (!wmeSDK?.Shortcuts || sdkShortcutDefs.length === 0) return;
+    if (!wmeSDK?.Shortcuts || sdkShortcutDefs.length === 0 || !_KC) return;
 
     var defsById = {};
     sdkShortcutDefs.forEach(function (def) {
@@ -465,7 +521,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       holders.forEach(function (holder) {
         if (holder === changedHolders[0]) return;
         if (_conflictBlockedKeys.has(holder) || _conflictStaleKeys.has(holder)) return;
-        keys[holder] = { raw: null, combo: null };
+        keys[holder] = { raw: null, combo: null, keys: null };
         _conflictStaleKeys.set(holder, combo);
         staleCleared = true;
         console.log(scriptName + ': cleared stale shortcut key for ' + holder + ' (SDK still reports "' + combo + '")');
