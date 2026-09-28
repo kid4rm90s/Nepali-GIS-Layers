@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.28.003
+// @version       2026.09.28.004
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -2637,9 +2637,14 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
      "DoR Road Closures (CLOSED)" - fully closed roads published by the
      Department of Roads, drawn as map markers.
 
-     The feed is the flat { "<id>": record } object maintained by the
-     DoR-Navigate-Closure-History GitHub Action:
-       https://github.com/kid4rm90s/DoR-Navigate-Closure-History
+     The feed is the flat { "<id>": record } object published by the
+     NavNP-Closure-History GitHub Action (a snapshot of the DoR closure
+     history) and served through GitHub Pages:
+       https://dummydev620.github.io/NavNP-Closure-History/dor_closure_state.json
+     A PUBLIC Pages URL is deliberate: this userscript is published, so a token
+     for a private repo would be handed to every installer, and the snapshot has
+     to be publicly readable for anyone but its author to see the closures at
+     all. It also keeps the refresh to one plain GET.
      Every record carries closure_type OPEN | PARTIAL_OPEN | CLOSED and the
      closure's latitude/longitude as STRINGS.
 
@@ -2653,7 +2658,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
      for a read-only icon overlay.
      ------------------------------------------------------------------ */
   var CLOSURE_FEED_URL =
-    'https://raw.githubusercontent.com/kid4rm90s/DoR-Navigate-Closure-History/refs/heads/master/dor_closure_state.json';
+    'https://raw.githubusercontent.com/dummydev620/NavNP-Closure-History/refs/heads/master/dor_closure_state.json';
   var CLOSURE_LAYER_NAME = 'NP_DoR_Closures';
   var CLOSURE_STORAGE_KEY = '_wme_nepali_wms_closures';
   var CLOSURE_MIN_ZOOM = 8;             // the markers are only drawn from this zoom up
