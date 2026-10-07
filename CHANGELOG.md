@@ -12,6 +12,22 @@ not this file.
 > `2026.09.20.023` onward were written as Markdown.
 
 
+## 2026.09.28.003
+
+**Added - a "DoR Road Closures (CLOSED)" card that draws the closed roads on the map:**
+- New card in the **Layers** tab, next to "Lalitpur HN Address Wards" and "Nepal GIS Layers". It fetches the Department of Roads closure history feed published by the `DoR-Navigate-Closure-History` GitHub Action and draws one red "no entry" marker per record whose `closure_type` is exactly `CLOSED`.
+- The feed is a flat `{ "<id>": record }` object, and every record carries `latitude`/`longitude` as **strings**. They are converted and range-checked in `buildClosureFeatures`; a record with a blank, non-numeric or out-of-range coordinate is dropped rather than placed at 0,0 - which would have put a phantom closure in the Gulf of Guinea.
+- The markers are drawn on a plain SDK point layer (`NP_DoR_Closures`) with an `externalGraphic` icon. That icon is an inline SVG data URI, so it needs no extra `@connect`, still renders when the network is down and cannot be blocked by the page CSP.
+- **Zoom gate:** the markers are only drawn from zoom 8 up, through a `styleRules` predicate that sets `display: 'none'` below it. That is a style change rather than an add/remove, so panning and zooming never churn the layer.
+- **Click a marker** for a detail popup: road ref + name, reason, district/division, location, link code and chainage, blocked-from / estimated-reopen / reopened times, repair ETA, efforts being made, remarks, contact person, and who reported it. The popup reuses the WMS popup element, and every value is escaped (`escapeHtml`) before it is interpolated - the remarks are typed by road project staff and must never come back out as markup.
+- The feed is fetched **once** and kept: switching the card's switch off and on again costs no request, and "Load / Refresh closures" is the explicit re-fetch. The switch is remembered in localStorage (`_wme_nepali_wms_closures`).
+- **Auto-refresh:** while the layer is switched on, the feed is re-fetched **once an hour** (`CLOSURE_REFRESH_MS`), so the markers follow the road project's own updates without a page reload. With the card off the timer does nothing and makes no request. The status line carries the time of the last successful fetch ("updated 14:05") - without it an hourly refresh would be invisible, and there would be no way to tell a quiet feed from a stuck one.
+- The layer is deliberately kept **out of `loadedGeoJSONLayers`**. That list feeds the Style Settings scope and label-field pickers and the shift dropdown, none of which mean anything for a read-only icon overlay - putting the closures in it would have added their properties to the label-field picker.
+- The layer still follows the script's **master layer-switcher checkbox**, so that one checkbox keeps owning every layer the script draws (`syncAllTogglerVisibility` now calls `syncClosureLayerVisibility`).
+- `@connect raw.githubusercontent.com` was added to the header. The update monitor also reaches that host, but only through the broader `githubusercontent.com` entry; this is the first request that depends on it directly.
+- Only `CLOSED` is drawn, which is what the card says. The feed also carries `PARTIAL_OPEN` and `OPEN`, and `navigate_dor_feed.py` already maps them CLOSED -> red, PARTIAL -> yellow, OPEN -> green, so widening this later is one predicate and one icon.
+- Verified: `node --check` exits 0.
+
 ## 2026.09.20.024
 
 **Changed - the update dialog now describes the feature set, not a changelog:**

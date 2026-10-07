@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.09.28.004
+// @version       2026.10.07.001
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -2668,13 +2668,18 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   // The marker: a red "no entry" disc with a white bar. An inline SVG data URI needs no
   // extra @connect, still renders when the network is down, and cannot be blocked by the
   // page CSP - the same reason the WME SDK's own marker example uses one.
-  var CLOSURE_ICON =
+ /* var CLOSURE_ICON =
     'data:image/svg+xml;charset=utf-8,' +
     encodeURIComponent(
       '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
         '<circle cx="12" cy="12" r="10" fill="#c62828" stroke="#ffffff" stroke-width="2"/>' +
         '<rect x="6.5" y="10.4" width="11" height="3.2" rx="1.2" fill="#ffffff"/>' +
         '</svg>'
+    );*/
+    var CLOSURE_ICON =
+      'data:image/svg+xml;charset=utf-8,' +
+        encodeURIComponent(
+          '<svg width="24px" height="24px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10zM7.403 7.403a1 1 0 0 1 1.414 0L12 10.586l3.183-3.183a1 1 0 1 1 1.414 1.414L13.414 12l3.183 3.183a1 1 0 0 1-1.414 1.414L12 13.414l-3.183 3.183a1 1 0 0 1-1.414-1.414L10.586 12 7.403 8.817a1 1 0 0 1 0-1.414z" fill="#c62828" stroke="#ffffff" stroke-width="2"/></svg>'
     );
 
   var closureEnabled = false;      // the card's master switch (persisted)
@@ -3365,12 +3370,14 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 
     //ČÚZK HRANICE * BORDER BOARD
     WMSLayerTogglers.wms_geonational = addLayerToggler(groupTogglerBorders, 'Geoportal National Border', false, [addNewLayer('wms_geonational', service_wms_geoportal, 'geonode:nepal')]);
+    WMSLayerTogglers.wms_geoprovince = addLayerToggler(groupTogglerBorders, 'Geoportal Province Border', false, [addNewLayer('wms_geoprovince', service_wms_geoportal, 'geonode:province0')]);
+    WMSLayerTogglers.wms_geodistrict = addLayerToggler(groupTogglerBorders, 'Geoportal District Border', false, [addNewLayer('wms_geodistrict', service_wms_geoportal, 'geonode:districts0')]);
+    WMSLayerTogglers.wms_geomunicipality = addLayerToggler(groupTogglerBorders, 'Geoportal Municipality Border', false, [addNewLayer('wms_geomunicipality', service_wms_geoportal, 'geonode:local_unit_nameupdated_wgs')]);
+    WMSLayerTogglers.wms_geoward = addLayerToggler(groupTogglerBorders, 'Geoportal Ward Border', false, [addNewLayer('wms_geoward', service_wms_geoportal, 'geonode:ward_nameupdated_wgs')]);
+    
     WMSLayerTogglers.wms_national = addLayerToggler(groupTogglerBorders, 'SSRN National Border', false, [addNewLayer('wms_national', service_wms_softwel, 'ssrn:ssrn_national_boundary_line')]);
-    WMSLayerTogglers.wms_geoprovince = addLayerToggler(groupTogglerBorders, 'Geoportal Province Border', false, [addNewLayer('wms_geoprovince', service_wms_geoportal, 'geonode:province')]);
     WMSLayerTogglers.wms_province = addLayerToggler(groupTogglerBorders, 'SSRN Province Border', false, [addNewLayer('wms_province', service_wms_softwel, 'ssrn:ssrn_province_line')]);
-    WMSLayerTogglers.wms_geodistrict = addLayerToggler(groupTogglerBorders, 'Geoportal District Border', false, [addNewLayer('wms_geodistrict', service_wms_geoportal, 'geonode:districts')]);
     WMSLayerTogglers.wms_district = addLayerToggler(groupTogglerBorders, 'SSRN District Border', false, [addNewLayer('wms_district', service_wms_softwel, 'ssrn:ssrn_district_boundary_line')]);
-    WMSLayerTogglers.wms_geomunicipality = addLayerToggler(groupTogglerBorders, 'Geoportal Municipality Border', false, [addNewLayer('wms_geomunicipality', service_wms_geoportal, 'geonode:NepalLocalUnits0')]);
     WMSLayerTogglers.wms_municipality = addLayerToggler(groupTogglerBorders, 'BSM Municipality Border', false, [addNewLayer('wms_municipality', service_wms_softwel, 'bsm:bsm_localbodies_line')]);
     WMSLayerTogglers.wms_dmg_states = addLayerToggler(groupTogglerBorders, 'DMG Province Border', false, [addNewLayer('wms_dmg_states', service_wms_dmgnepal, 'dmg:states')]);
     WMSLayerTogglers.wms_dmg_districts = addLayerToggler(groupTogglerBorders, 'DMG District Border', false, [addNewLayer('wms_dmg_districts', service_wms_dmgnepal, 'dmg:districts')]);
@@ -3418,8 +3425,14 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         { key: 'wms_rivers', service: service_wms_softwel, queryLayer: 'ssrn:ssrn_major_river,npgp:river_nepal', displayName: 'Rivers', formatFn: (feature) => formatFeatureInfo('RIVER', feature) },
         { key: 'wms_prtmp_education', service: service_wms_softwel, queryLayer: 'prtmp_01:prtmp_education', displayName: 'Education Facilities (PRTMP)', formatFn: (feature) => formatFeatureInfo('EDUCATION', feature) },
         { key: 'wms_prtmp_health', service: service_wms_softwel, queryLayer: 'prtmp_01:health_facilities', displayName: 'Health Facilities (PRTMP)', formatFn: (feature) => formatFeatureInfo('HEALTH', feature) },
+// layers from nationalgeoportal.gov.np (Geoportal)
         { key: 'wms_geoportal_health', service: service_wms_geoportal, queryLayer: 'geonode:health_facilities', displayName: 'Health Facilities (Geoportal)', formatFn: (feature) => formatFeatureInfo('GEO_HEALTH', feature) },
         { key: 'wms_geoportal_police', service: service_wms_geoportal, queryLayer: 'geonode:All_Nepal_Final_short', displayName: 'Police Units (Geoportal)', formatFn: (feature) => formatFeatureInfo('GEO_POLICE', feature) },
+        { key: 'wms_geoprovince', service: service_wms_geoportal, queryLayer: 'geonode:province0', displayName: 'Geoportal Province Border', formatFn: (feature) => formatFeatureInfo('GEO_PROVINCE', feature) },
+        { key: 'wms_geodistrict', service: service_wms_geoportal, queryLayer: 'geonode:districts0', displayName: 'Geoportal District Border', formatFn: (feature) => formatFeatureInfo('GEO_DISTRICT', feature) },
+        { key: 'wms_geomunicipality', service: service_wms_geoportal, queryLayer: 'geonode:local_unit_nameupdated_wgs', displayName: 'Geoportal Municipality Border', formatFn: (feature) => formatFeatureInfo('GEO_MUNICIPALITY', feature) },
+        { key: 'wms_geoward', service: service_wms_geoportal, queryLayer: 'geonode:ward_nameupdated_wgs', displayName: 'Geoportal Ward Border', formatFn: (feature) => formatFeatureInfo('GEO_WARD', feature) },
+// layers from prtmp_01 (Softwel)
         { key: 'wms_prtmp_palika', service: service_wms_softwel, queryLayer: 'prtmp_01:palika_center', displayName: 'Palika Centre (PRTMP)', formatFn: (feature) => formatFeatureInfo('PALIKA', feature) },
         { key: 'wms_prtmp_ward', service: service_wms_softwel, queryLayer: 'prtmp_01:prtmp_ward_center', displayName: 'Ward Centre (PRTMP)', formatFn: (feature) => formatFeatureInfo('WARD', feature) },
         { key: 'wms_prtmp_tourist', service: service_wms_softwel, queryLayer: 'prtmp_01:tourist_attraction', displayName: 'Tourist Attraction', formatFn: (feature) => formatFeatureInfo('TOURIST', feature) },
@@ -3768,6 +3781,39 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
             ['Nepali_Nam', 'Nep Name'],
             ['dis', 'District'],
             ['Provinces', 'Province'],
+          ],
+        },
+        GEO_PROVINCE: {
+          title: (feature) => feature.layerName || 'Province Borders',
+          fields: [
+            ['Name_E', 'Name'],
+            ['Name', 'Name'],
+          ],
+        },
+        GEO_DISTRICT: {
+          title: (feature) => feature.layerName || 'District Borders',
+          fields: [
+            ['FIRST_DIST', 'District'],
+            ['PNAME', 'Province'],
+          ],
+        },
+        GEO_MUNICIPALITY: {
+          title: (feature) => feature.layerName || 'Municipality Borders',
+          fields: [
+            ['gapa_napa', 'Mun Name'],
+            ['type_gn', 'Type'],
+            ['district', 'District'],
+            ['province', 'Province'],
+          ],
+        },
+        GEO_WARD: {
+          title: (feature) => feature.layerName || 'Ward Borders',
+          fields: [
+            ['new_ward_n', 'Ward No'],
+            ['gapa_napa', 'Mun Name'],
+            ['type_gn', 'Type'],
+            ['district', 'District'],
+            ['province', 'Province'],
           ],
         },
         RIVER: {
