@@ -12,6 +12,19 @@ not this file.
 > `2026.09.20.023` onward were written as Markdown.
 
 
+## 2026.10.08.001
+
+**Added - the postal address card gains a category guard and two icon buttons:**
+- **No card for natural features.** A place categorised **Forest**, **River** or **Canal** (`FOREST_GROVE`, `RIVER_STREAM`, `CANAL` - all `NATURAL_FEATURES` sub-categories) no longer gets the postal address card. A postal address means nothing for a tract of forest or a stretch of river, and the card only invited a wrong address into the description. The guard is venue-only: a segment carries no categories, so segment selections are unaffected.
+- The **Copy** text button is now a **copy icon button** - less width, and it means the same thing in any editor language. The copy behaviour is unchanged (the address is read from the card at click time), and the feedback is now an icon swap to a checkmark rather than the word "Copied".
+- A new **description icon button** writes the SAME address into the selected place's description, through `Venues.updateVenue({ venueId, description })`. It is shown only for a venue (a segment has no description field). If the description is **already set**, it does not overwrite: a WazeToastr confirm ("Replace it with the postal address?") appears, and only **Replace** writes. An empty description is written directly. This keeps a hand-written description safe from a one-click overwrite.
+
+**Changed - the Nepal GIS auto-load layers no longer use hardcoded colours:**
+- Each level on the "Auto-load layers in view" card now has its own **colour picker**, so the palette is the user's choice, persisted with the rest of the group's state (`_wme_nepali_wms_np_gis`).
+- The **defaults** for district and municipality were changed so the four levels stay distinct from each other and from WME's own road colours (WME roads are cyan and orange): district `#FB8C00` (orange) → **amber `#ffa600`**, municipality `#26C6DA` (cyan) → **deep pink `#D81B60`**.
+- The per-level picker is an **override**: with no colour picked the level follows the **Style Settings** tab's **Stroke Color** (global, or that layer's own override) exactly like any other feature layer - so both controls work. A per-level **reset** button drops the override and hands the level back to Style Settings.
+- The swatch next to each level shows the colour the level is **actually drawn in** (its override, or the inherited Style Settings colour), and the picker/label tooltips say the colour can be set on the Settings tab or overridden per level. A colour change repaints the loaded layers immediately - no reload.
+
 ## 2026.09.28.003
 
 **Added - a "DoR Road Closures (CLOSED)" card that draws the closed roads on the map:**
