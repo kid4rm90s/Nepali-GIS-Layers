@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Nepali GIS layers
-// @version       2026.10.08.001
+// @version       2026.10.08.002
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -8204,7 +8204,7 @@ function scriptupdatemonitor() {
     updateMonitor.start(2, true); // checkImmediately = true
 
     // Show the update dialog for the current version
-    WazeToastr.Interface.ShowScriptUpdate(scriptName, scriptVersion, updateMessage, downloadUrl);
+    WazeToastr.Interface.ShowScriptUpdate(scriptName, scriptVersion, updateMessage, downloadUrl, forumUrl);
   } else {
     setTimeout(scriptupdatemonitor, 250);
   }
