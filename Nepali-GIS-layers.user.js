@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Nepali GIS layers
-// @version       2026.10.07.001
+// @version       2026.10.08.001
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -47,17 +47,11 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   ('use strict');
   const updateMessage =
 '<strong>What is new</strong><br>' +
-'- <strong>Postal codes:</strong> select a <em>segment</em> or a <em>venue</em> and an address card appears under its address fields, with the ward, postal code and a <em>Copy</em> button. The code comes from the published government address sheet, matched to the ward the feature actually sits in. Switch between the 7-digit ward code and the 5-digit city code, and turn the sub-city and the <em>Province</em> suffix on or off, on the <em>Settings</em> tab.<br>' +
-'- <strong>New full UI:</strong> the sidebar tab is split into <em>Layers</em>, <em>Shifting</em> and <em>Settings</em>. Layer groups are collapsible cards with a per-group <em>opacity slider</em> and one checkbox per layer, plus an on/total count - so opacity, groups and checkboxes are all under your control, and your selection and opacity are remembered.<br>' +
-'- <strong>Mostly converted to the WME SDK:</strong> layers, styling, events, keyboard shortcuts, the layer-switcher checkbox and Street View are all on the SDK now instead of the legacy <code>W</code> object and OpenLayers-2 internals. WMS tile layers stay on OL2, because the SDK has no WMS layer type yet.<br>' +
-'- <strong>One shift control for everything:</strong> a single dropdown and one 3x3 pad in the <em>Shifting</em> tab move either a WMS layer or a loaded ward layer, in metres, with <em>Reset Shift</em> and the applied shift shown underneath.<br>' +
-'- <strong>Choose what a loaded layer displays:</strong> the <em>Style Settings</em> card has a <em>Label field</em> picker, listing every property the loaded features carry - so a ward can be labelled with its postal code, ward code, district or any <code>${attr}</code> template. Applies to the LMC ward layers and both Nepal GIS levels.<br>' +
-'- <strong>User-friendly styling:</strong> Stroke Color, Font Size, Label and Outline Color (each with a <em>Match stroke</em> switch), Outline Width, Fill Opacity, Line Size / Style / Opacity and Label Position, with one global style plus an optional per-layer override. Changes redraw the layer in place - nothing is reloaded - and are saved.<br>' +
-'- <strong>Auto-loading ward layers:</strong> <em>Lalitpur HN Address Wards</em> and <em>Nepal GIS Layers</em> fetch only what is in the current view. Tick the wards, or the province / district / municipality / ward levels, and layers load as you pan and drop again once off screen.<br>' +
-'- <strong>Address and map fixes:</strong> the card no longer jumps to the top of the edit panel, Google place addresses are no longer shown (they are often wrong), and saved layer opacity is applied again after a reload instead of resetting.<br>';
+'- <strong>Postal codes:</strong> select a <em>segment</em> or a <em>venue</em> and an address card appears under its address fields, with the ward, postal code and two icon buttons - <em>copy</em> the address, and write it into the place <em>description</em>. Forest, river and canal places get no card, because a postal address means nothing for a natural feature. The code comes from the published government address sheet, matched to the ward the feature actually sits in. Switch between the 7-digit ward code and the 5-digit city code, and turn the sub-city and the <em>Province</em> suffix on or off, on the <em>Settings</em> tab.<br>';
   const scriptName = GM_info.script.name;
   const scriptVersion = GM_info.script.version;
   const downloadUrl = 'https://greasyfork.org/scripts/521924-nepali-gis-layers/code/nepali-gis-layers.user.js';
+  const forumURL = 'https://greasyfork.org/scripts/521924-nepali-gis-layers/feedback'
   let wmeSDK;
 
   var WMSLayersTechSource = {};
@@ -1838,12 +1832,43 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   // line opacity/style, fill opacity, label colour, outline and position - still comes from
   // the Style Settings card, applied through layerStyleAugments so a style change cannot
   // drop the level's colour or weight.
+  // The DEFAULTS here are the fallback; the live colour of a level is npGisLevelColors[level]
+  // (initialised from these, then overridden by the user's picker - see loadNpGisState).
+  // The four defaults are kept far apart from EACH OTHER (a violet district sat too close to
+  // the ward's magenta) and off the WME road palette, where cyan and orange both read as a road.
   var NP_GIS_LEVEL_STYLE = {
     province: { color: '#E53935', weight: 3 },      // red
-    district: { color: '#FB8C00', weight: 2 },      // orange
-    municipality: { color: '#26C6DA', weight: 2 },  // cyan
-    ward: { color: '#e100ff', weight: 1 },          // magenta
+    district: { color: '#ffa600', weight: 2.5 },    // amber
+    municipality: { color: '#D81B60', weight: 2 },  // deep pink (was cyan - same as WME roads)
+    ward: { color: '#e100ff', weight: 1.5 },        // magenta
   };
+
+  // Per-level stroke colour OVERRIDE. A level with an entry here ignores the Style Settings
+  // stroke colour and is drawn in this one; a level whose entry is the empty string has no
+  // override and is drawn in whatever the Style Settings tab gives it - global, or that
+  // layer's own override - exactly like any other feature layer.
+  // Seeded from NP_GIS_LEVEL_STYLE so the hierarchy is distinct out of the box, and cleared
+  // again by each level's "reset" control on the card (see resetNpGisLevelColor).
+  var npGisLevelColors = {};
+  NP_GIS_LEVELS.forEach(function (level) {
+    npGisLevelColors[level] = (NP_GIS_LEVEL_STYLE[level] || {}).color || '';
+  });
+
+  /** The stroke colour the Style Settings tab currently applies to a layer without an
+   *  override - the value a level falls back to, and the one its picker shows after a reset. */
+  function npGisStyleSettingsColor(layerName) {
+    try {
+      return resolveStyleValues(rawStyleValues(layerName)).strokeColor;
+    } catch (e) {
+      return FEATURE_STYLE_DEFAULTS.strokeColor;
+    }
+  }
+
+  // Refreshers of the Nepal GIS card's per-level colour swatches, one per level, built with
+  // the card. They re-point each picker/dot at the colour the level is actually drawn in, so
+  // a change made on the Settings tab's Style Settings is reflected when the user comes back
+  // to the Layers tab - the card itself is built once and never rebuilt.
+  var npGisColorSwatchRefreshers = [];
   // The outline levels are drawn from dissolved polygons that carry no display name of
   // their own, so they were originally routed through the unlabelled 'boundary' type.
   // They now get a per-level DEFAULT LABEL instead (see NP_GIS_LEVEL_DEFAULT_LABEL), and
@@ -2011,7 +2036,12 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     var levelStyle = NP_GIS_LEVEL_STYLE[level] || {};
     var defaultLabel = NP_GIS_LEVEL_DEFAULT_LABEL[level] || '';
     return function (state) {
-      if (levelStyle.color) state.strokeColor = levelStyle.color;
+      // An override wins; with no override the base colour is left exactly as the Style
+      // Settings tab resolved it, so that tab's Stroke Color works on these levels too. The
+      // augment re-runs on every style resolve (see applyStyleToLoadedLayers), so either
+      // source needs no layer rebuild.
+      var color = npGisLevelColors[level];
+      if (color) state.strokeColor = color;
       state.lineSize = (Number(state.lineSize) || 0) * (levelStyle.weight || 1);
       // The sentinels mean "follow the stroke colour", and resolveStyleValues already
       // resolved them against the BASE colour - so that has to be redone here.
@@ -2568,6 +2598,14 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         if (typeof saved.levels[level] === 'boolean') npGisLevelsEnabled[level] = saved.levels[level];
       });
     }
+    // Per-level stroke colours. Only a value that looks like a colour is accepted, so a
+    // corrupt or hand-edited store cannot paint a layer invisible or crash the renderer.
+    if (saved.colors && typeof saved.colors === 'object') {
+      NP_GIS_LEVELS.forEach(function (level) {
+        var value = saved.colors[level];
+        if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) npGisLevelColors[level] = value;
+      });
+    }
   }
 
   function saveNpGisState() {
@@ -2575,6 +2613,36 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       enabled: npGisEnabled,
       autoRemove: npGisAutoRemoveEnabled,
       levels: npGisLevelsEnabled,
+      colors: npGisLevelColors,
+    });
+  }
+
+  // Sets one level's stroke colour OVERRIDE, persists it and restyles the layers already on
+  // the map (the augment reads the override, so a redraw is all that is needed - no reload).
+  function setNpGisLevelColor(level, color) {
+    if (NP_GIS_LEVELS.indexOf(level) === -1) return;
+    if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) return;
+    npGisLevelColors[level] = color;
+    saveNpGisState();
+    scheduleStyleApply();
+  }
+
+  // Drops one level's override so it follows the Style Settings tab again, and restyles.
+  function resetNpGisLevelColor(level) {
+    if (NP_GIS_LEVELS.indexOf(level) === -1) return;
+    npGisLevelColors[level] = '';
+    saveNpGisState();
+    scheduleStyleApply();
+  }
+
+  /** Re-points every level's colour swatch at the colour it is actually drawn in. */
+  function refreshNpGisLevelSwatches() {
+    npGisColorSwatchRefreshers.forEach(function (refresh) {
+      try {
+        refresh();
+      } catch (e) {
+        // A refresh must never break the tab switch; the swatch simply keeps its old value.
+      }
     });
   }
 
@@ -4282,7 +4350,16 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 
     // --- Sub-tabs ---------------------------------------------------------
     var tabs = npwTabs(panel, [
-      { id: 'layers', label: 'Layers', title: 'Show / hide the WMS layer groups' },
+      {
+        id: 'layers',
+        label: 'Layers',
+        title: 'Show / hide the WMS layer groups',
+        // The Nepal GIS level swatches reflect the Style Settings stroke colour, which is
+        // edited on the Settings tab, so they are re-pointed whenever this tab comes back.
+        onShow: function () {
+          refreshNpGisLevelSwatches();
+        },
+      },
       { id: 'shifting', label: 'Shifting', title: 'Shift a layer and adjust its opacity' },
       {
         id: 'settings',
@@ -5161,6 +5238,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     // default: the three outline levels are wide fills that would hide the map unasked.
     npGisBody.appendChild(npwCreate('span', 'npw-small-label', 'Levels:'));
     var npGisLevelRow = npwCreate('div', 'npw-level-row');
+    npGisColorSwatchRefreshers = [];
     var npGisLevelSource = {
       province: 'one dissolved outline per province',
       district: 'one dissolved outline per district',
@@ -5168,20 +5246,19 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       ward: 'one polygon per ward, labelled with the ward name the KML carries',
     };
     NP_GIS_LEVELS.forEach(function (level) {
-      var levelStyle = NP_GIS_LEVEL_STYLE[level] || {};
-      var levelItem = npwCreate('label', 'npw-level-item');
-      levelItem.title =
-        NP_GIS_LEVEL_LABEL[level] +
-        ' — ' +
-        (npGisLevelSource[level] || '') +
-        '. Drawn in ' +
-        (levelStyle.color || 'the Style Settings colour') +
-        ', loaded from zoom ' +
-        NP_GIS_LEVEL_MIN_ZOOM[level] +
-        '+ (below that its layers are dropped again). Default label: ' +
-        (NP_GIS_LEVEL_DEFAULT_LABEL[level] || 'the ward name the KML carries');
+      // The item is a plain div and the checkbox row a nested <label>, so the colour picker
+      // can sit BESIDE the label rather than inside it. A <label> that also wraps an
+      // <input type="color"> gives the two controls an ambiguous association, and a click on
+      // the swatch can toggle the level as well - keeping the picker outside avoids it.
+      var levelItem = npwCreate('div', 'npw-level-item');
+      var levelLabel = npwCreate('label', 'npw-level-label');
       var levelDot = npwCreate('span', 'npw-level-dot');
-      levelDot.style.backgroundColor = levelStyle.color || 'transparent';
+      // The dot shows the colour the level is ACTUALLY drawn in: its override, or the Style
+      // Settings stroke colour it inherits while it has none.
+      var levelDotColor = function () {
+        return npGisLevelColors[level] || npGisStyleSettingsColor();
+      };
+      levelDot.style.backgroundColor = levelDotColor();
       var levelCheckbox = document.createElement('input');
       levelCheckbox.type = 'checkbox';
       levelCheckbox.className = 'npw-checkbox';
@@ -5190,9 +5267,59 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       levelCheckbox.addEventListener('change', function () {
         setNpGisLevelEnabled(level, levelCheckbox.checked);
       });
-      levelItem.appendChild(levelCheckbox);
-      levelItem.appendChild(levelDot);
-      levelItem.appendChild(npwCreate('span', 'npw-level-text', NP_GIS_LEVEL_LABEL[level]));
+      // A colour picker per level, so the user controls the palette instead of living with
+      // the hardcoded default. The dot next to the checkbox is the swatch: it follows the
+      // picker, and the picker is a colour input the browser already themes.
+      // The picker always shows a real colour: the override when there is one, otherwise the
+      // Style Settings stroke colour it is inheriting - so the swatch never lies about what
+      // is on the map.
+      var levelColor = document.createElement('input');
+      levelColor.type = 'color';
+      levelColor.className = 'npw-color npw-level-color';
+      levelColor.id = 'npGisColor' + level.charAt(0).toUpperCase() + level.slice(1);
+      levelColor.value = levelDotColor();
+      levelColor.title =
+        'Colour for the ' +
+        NP_GIS_LEVEL_LABEL[level] +
+        ' layer. With no colour picked here, the Style Settings tab drives this level - pick one to override it.';
+      levelColor.addEventListener('input', function () {
+        levelDot.style.backgroundColor = levelColor.value;
+        setNpGisLevelColor(level, levelColor.value);
+      });
+      // Reset: drop the override so the level follows the Style Settings tab again. The
+      // picker is re-pointed at the inherited colour so the swatch keeps matching the map.
+      var levelReset = npwCreate('button', 'npw-level-reset', '\u21BA');
+      levelReset.type = 'button';
+      levelReset.title =
+        'Reset the ' + NP_GIS_LEVEL_LABEL[level] + ' colour to the Style Settings tab (removes this level\'s override)';
+      levelReset.setAttribute('aria-label', levelReset.title);
+      levelReset.addEventListener('click', function () {
+        resetNpGisLevelColor(level);
+        var inherited = npGisStyleSettingsColor();
+        levelColor.value = inherited;
+        levelDot.style.backgroundColor = inherited;
+      });
+      levelLabel.title =
+        NP_GIS_LEVEL_LABEL[level] +
+        ' — ' +
+        (npGisLevelSource[level] || '') +
+        '. Drawn in its colour swatch - set on the Settings tab (Style Settings, Stroke Color) or with this level\'s colour picker, which overrides it. Loaded from zoom ' +
+        NP_GIS_LEVEL_MIN_ZOOM[level] +
+        '+ (below that its layers are dropped again). Default label: ' +
+        (NP_GIS_LEVEL_DEFAULT_LABEL[level] || 'the ward name the KML carries');
+      levelLabel.appendChild(levelCheckbox);
+      levelLabel.appendChild(levelDot);
+      levelLabel.appendChild(npwCreate('span', 'npw-level-text', NP_GIS_LEVEL_LABEL[level]));
+      levelItem.appendChild(levelLabel);
+      levelItem.appendChild(levelColor);
+      levelItem.appendChild(levelReset);
+      // Re-point the swatch at the level's effective colour; run when the Layers tab is
+      // shown, because the Style Settings stroke colour may have changed in the meantime.
+      npGisColorSwatchRefreshers.push(function () {
+        var shown = levelDotColor();
+        levelColor.value = shown;
+        levelDot.style.backgroundColor = shown;
+      });
       npGisLevelRow.appendChild(levelItem);
     });
     npGisBody.appendChild(npGisLevelRow);
@@ -5755,10 +5882,18 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       // Hierarchy-level row of the "Nepal GIS Layers" card. Same native-control gotcha as
       // the ward grid, so the checkbox is targeted as a compound selector.
       '.npw-level-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 4px 0 6px; }',
-      '.npw-level-item { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 10px; color: var(--content_p1, #333); cursor: pointer; user-select: none; white-space: nowrap; }',
-      '.npw-level-item > input.npw-checkbox { flex: 0 0 auto; width: 13px !important; height: 13px !important; min-width: 13px; margin: 0 !important; padding: 0 !important; cursor: pointer; accent-color: var(--primary, #DC143C); }',
+      '.npw-level-item { display: inline-flex; align-items: center; gap: 4px; margin: 0; }',
+      '.npw-level-label { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 10px; color: var(--content_p1, #333); cursor: pointer; user-select: none; white-space: nowrap; }',
+      '.npw-level-label > input.npw-checkbox { flex: 0 0 auto; width: 13px !important; height: 13px !important; min-width: 13px; margin: 0 !important; padding: 0 !important; cursor: pointer; accent-color: var(--primary, #DC143C); }',
       '.npw-level-dot { flex: 0 0 auto; box-sizing: border-box; width: 8px; height: 8px; border: 1px solid rgba(0, 0, 0, 0.35); border-radius: 2px; }',
       '.npw-level-text { line-height: 1.3; }',
+      // Per-level colour picker on the Nepal GIS card: a small swatch sized to sit inline
+      // with the checkbox and dot. Compound selector to outrank WME's own input styling.
+      '.npw-level-item > input.npw-level-color { flex: 0 0 auto; width: 16px !important; height: 14px !important; min-width: 16px; padding: 0 !important; margin: 0 !important; border: 1px solid var(--hairline, #ccc); border-radius: 3px; background: none; cursor: pointer; }',
+      // Per-level "reset to Style Settings" control: a small flat button so it reads as a
+      // sibling of the swatch, not a full-width .npw-btn.
+      '.npw-level-item > button.npw-level-reset { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 14px; min-width: 0; padding: 0; margin: 0; border: 1px solid var(--hairline, #ccc); border-radius: 3px; background: var(--surface_variant, rgba(127, 127, 127, 0.12)); color: var(--content_p1, #333); font-size: 10px; line-height: 1; cursor: pointer; }',
+      '.npw-level-item > button.npw-level-reset:hover { background: var(--surface_default, rgba(127, 127, 127, 0.24)); }',
       // Attribute list of the Style Settings label-field picker.
       '.npw-attr-list { max-height: 132px; overflow-y: auto; margin: 2px 0 6px; padding: 3px 5px; border: 1px solid var(--hairline, #ccc); border-radius: 4px; background: rgba(127, 127, 127, 0.07); font-size: 10px; }',
       '.npw-attr-row { display: flex; gap: 6px; padding: 1px 0; }',
@@ -5772,8 +5907,11 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       '.npw-address-icon { flex: 0 0 auto; display: inline-flex; align-items: center; color: var(--primary, #DC143C); }',
       '.npw-address-icon > svg { display: block; }',
       '.npw-address-value { flex: 1 1 auto; min-width: 0; font-weight: 600; word-break: break-word; }',
-      // Beats ".npw-btn { width: 100% }" on specificity, so no !important is needed.
-      '.npw-address-row > button.npw-address-copy { flex: 0 0 auto; width: auto; min-width: 0; padding: 1px 7px; margin: 0; border-radius: 3px; font-size: 9px; font-weight: 600; line-height: 1.6; }',
+      // The copy / description buttons are ICONS, so they are a fixed square rather than the
+      // full-width text button .npw-btn defaults to. Beats ".npw-btn { width: 100% }" on
+      // specificity, so no !important is needed; the svg is centred by the flex layout.
+      '.npw-address-row > button.npw-address-copy { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 20px; min-width: 0; height: 20px; padding: 0; margin: 0; border-radius: 3px; line-height: 1; }',
+      '.npw-address-row > button.npw-address-copy > svg { display: block; }',
       '.npw-address-warn { margin-top: 2px; font-size: 9px; line-height: 1.3; color: #b26a00; }',
       '.npw-split { display: flex; gap: 8px; }',
       '.npw-split > div { flex: 1; }',
@@ -7193,6 +7331,23 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
   var postalAddressTimer = null;
   var postalAddressRetry = 0; // bounded retries while the edit panel is still rendering
 
+  // Place categories that get NO postal address card. All three are sub-categories of
+  // VENUE_MAIN_CATEGORY.NATURAL_FEATURES, and a place of this kind is a natural feature -
+  // a tract of forest, a river, a canal - where a postal address is meaningless and the
+  // card would only invite a wrong address into the description. The ids are the SDK's
+  // VENUE_SUBCATEGORIES values, compared exactly; no localisation is involved.
+  var POSTAL_BLOCKED_VENUE_CATEGORIES = ['FOREST_GROVE', 'RIVER_STREAM', 'CANAL'];
+
+  /** True when a venue carries any of the blocked natural-feature categories. */
+  function postalVenueHasBlockedCategory(venue) {
+    var categories = venue && venue.categories;
+    if (!categories || !categories.length) return false;
+    for (var i = 0; i < categories.length; i++) {
+      if (POSTAL_BLOCKED_VENUE_CATEGORIES.indexOf(categories[i]) !== -1) return true;
+    }
+    return false;
+  }
+
   /** Ray-casting point-in-polygon test over a single ring. */
   function postalPointInRing(point, ring) {
     var x = point[0];
@@ -7477,6 +7632,10 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
         venue = null;
       }
       if (!venue) return null;
+      // A natural-feature place (forest, river, canal) gets no card at all - see
+      // POSTAL_BLOCKED_VENUE_CATEGORIES. This is a venue-only test: a segment carries no
+      // categories, so segment selections are never affected.
+      if (postalVenueHasBlockedCategory(venue)) return null;
       var hasGeometry =
         venue.geometry &&
         (venue.geometry.type === 'Point' || (venue.geometry.coordinates && venue.geometry.coordinates.length));
@@ -7651,12 +7810,13 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
       card.id = POSTAL_ADDRESS_CARD_ID;
     }
 
-    // ONE compact row: a postal envelope icon, the address, and the copy button. The
-    // ward/code detail is a tooltip rather than a line of its own, which is what keeps
-    // the whole thing to a single line above the address inputs.
+    // ONE compact row: a postal envelope icon, the address, and two icon buttons - copy the
+    // address, and write it into the place description. The ward/code detail is a tooltip
+    // rather than a line of its own, which is what keeps the whole thing to a single line
+    // above the address inputs.
     var row = card.querySelector('.npw-address-row');
     if (row) {
-      // Only the text is written - the row and its button stay exactly where they are.
+      // Only the text is written - the row and its buttons stay exactly where they are.
       row.querySelector('.npw-address-value').textContent = fullAddress;
     } else {
       row = npwCreate('div', 'npw-address-row');
@@ -7673,28 +7833,111 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
         '</svg>';
       row.appendChild(icon);
       row.appendChild(npwCreate('span', 'npw-address-value', fullAddress));
-      var copyBtn = npwButton(null, 'Copy', 'Copy this address to the clipboard', 'primary', 'npw-address-copy');
+
+      // The two action buttons are ICONS rather than words, so they mean the same thing in
+      // any editor language and take a fixed amount of width. The icons are the only part of
+      // these buttons' faces that change, so the swap-and-restore helpers below only touch
+      // innerHTML - never the button's layout.
+      var COPY_ICON =
+        '<svg viewBox="0 0 16 16" width="13" height="13" focusable="false">' +
+        '<rect x="5.4" y="5.4" width="8.4" height="8.4" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+        '<path d="M10.6 5.4V3.6a1.2 1.2 0 0 0-1.2-1.2H3.6a1.2 1.2 0 0 0-1.2 1.2v5.8a1.2 1.2 0 0 0 1.2 1.2h1.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+        '</svg>';
+      var DESC_ICON =
+        '<svg viewBox="0 0 16 16" width="13" height="13" focusable="false">' +
+        '<path d="M3.4 2.4h6l3.2 3.2v8a1 1 0 0 1-1 1H3.4a1 1 0 0 1-1-1v-10.2a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
+        '<path d="M9.2 2.6v3.2h3.2M5 9h6M5 11.2h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+        '</svg>';
+      var OK_ICON =
+        '<svg viewBox="0 0 16 16" width="13" height="13" focusable="false">' +
+        '<path d="M3.4 8.4l3 3 6.2-6.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '</svg>';
+
+      var copyBtn = npwButton(null, '', 'Copy this address to the clipboard', 'primary', 'npw-address-copy');
+      copyBtn.innerHTML = COPY_ICON;
+      copyBtn.setAttribute('aria-label', 'Copy this address to the clipboard');
       row.appendChild(copyBtn);
+
+      // Writes the SAME text the copy button copies into the selected place's description.
+      // Only ever offered for a venue (the button is hidden for a segment - see below); the
+      // SDK updateVenue() call is the write path, and is gated on the description being
+      // empty so it can never silently destroy text an editor already typed.
+      var descBtn = npwButton(null, '', 'Put this address in the place description', 'primary', 'npw-address-copy');
+      descBtn.innerHTML = DESC_ICON;
+      descBtn.setAttribute('aria-label', 'Put this address in the place description');
+      descBtn.setAttribute('data-npw-address-desc', 'true');
+      row.appendChild(descBtn);
+
       card.appendChild(row);
-      // Bound once, on the node that now outlives every refill. The text is read from the
-      // card at click time rather than closed over, so it can never copy a stale address.
+
+      // "Copied" / "Done" feedback is an icon swap, not a text change, because the buttons
+      // have no text. Bound once on the shared row, and the address is read from the card at
+      // click time rather than closed over, so a refilled card can never be acted on stale.
+      var flashIcon = function (btn, restore) {
+        btn.innerHTML = OK_ICON;
+        setTimeout(function () {
+          // Only restore a button still showing this result, so a slow action cannot
+          // overwrite the face of a card that has since been refilled.
+          if (btn.innerHTML === OK_ICON) btn.innerHTML = restore;
+        }, 1500);
+      };
+
       copyBtn.addEventListener('click', function () {
         var value = card.querySelector('.npw-address-value');
         value = value ? value.textContent : '';
         if (!value) return;
         navigator.clipboard.writeText(value).then(function () {
-          copyBtn.textContent = 'Copied';
-          setTimeout(function () {
-            // Only restore the face of a button still showing this result, so a slow copy
-            // cannot overwrite the label of a card that has since been refilled.
-            if (copyBtn.textContent === 'Copied') copyBtn.textContent = 'Copy';
-          }, 1500);
+          flashIcon(copyBtn, COPY_ICON);
         }).catch(function (e) {
           // writeText REJECTS rather than throws, so the catch belongs on the promise.
           console.warn(scriptName + ': clipboard copy failed', e);
         });
       });
+
+      descBtn.addEventListener('click', function () {
+        var value = card.querySelector('.npw-address-value');
+        value = value ? value.textContent : '';
+        if (!value) return;
+        var target = postalResolveTarget();
+        // The button only exists next to a place's address editor; a segment has no place
+        // description, so a segment selection simply does nothing here.
+        if (!target || target.kind !== 'venue') return;
+        var venueId = target.venue.id;
+        var current = target.venue.description ? String(target.venue.description).trim() : '';
+        var writeDescription = function () {
+          try {
+            wmeSDK.DataModel.Venues.updateVenue({ venueId: venueId, description: value });
+            flashIcon(descBtn, DESC_ICON);
+          } catch (e) {
+            console.warn(scriptName + ': could not write the place description', e);
+          }
+        };
+        if (!current) {
+          writeDescription();
+          return;
+        }
+        // Never overwrite text that is already there without asking - the description is
+        // hand-written editor content, and this button is one click next to a refill.
+        try {
+          WazeToastr.Alerts.confirm(
+            scriptName,
+            'This place already has a description. Replace it with the postal address?',
+            writeDescription,
+            function () {},
+            'Replace',
+            'Keep'
+          );
+        } catch (e) {
+          // Toastr unavailable: leave the description alone rather than clobber it.
+          console.warn(scriptName + ': WazeToastr confirm failed', e);
+        }
+      });
     }
+    // The description button is only meaningful for a place - a segment has no description
+    // field. The row is built once and reused across selections, so the button is shown or
+    // hidden here, on every pass, rather than being added and removed with the card.
+    var descBtnToggle = card.querySelector('[data-npw-address-desc]');
+    if (descBtnToggle) descBtnToggle.style.display = target.kind === 'venue' ? '' : 'none';
     // Only the warning lines are rebuilt; the row above is left where it is.
     card.querySelectorAll('.npw-address-warn').forEach(function (warn) {
       warn.remove();
