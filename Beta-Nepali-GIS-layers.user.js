@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.10.09.011
+// @version       2026.10.09.012
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -217,6 +217,24 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       return apiMessage || ('GalliMap rejected the lookup (HTTP 404). ' + (body && body.__url ? 'URL: ' + body.__url : ''));
     }
     return apiMessage || 'GalliMap HTTP ' + status;
+  }
+
+  /**
+   * Raises a toast for a GalliMap event. The card has its own inline status line; a toast
+   * is for things the user should notice without watching the panel - a failure, or a
+   * completed action. Never throws: WazeToastr may be missing, and a lost notification
+   * must not break the lookup that raised it.
+   * @param {'success'|'warning'|'error'|'info'} level
+   * @param {string} message
+   * @param {number} [durationMs]
+   */
+  function galliMapToast(level, message, durationMs) {
+    try {
+      var alert = WazeToastr.Alerts[level] || WazeToastr.Alerts.info;
+      alert(scriptName, message, false, false, durationMs || 4000);
+    } catch (e) {
+      console.warn(scriptName + ': WazeToastr ' + level + ' failed', e);
+    }
   }
 
   // JSON GET through GM_xmlhttpRequest (no CORS limits), mirroring npGisFetchText.
@@ -4434,6 +4452,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     function galliMapShowAt(point, statusEl) {
       if (!galliMapToken()) {
         if (statusEl) statusEl.textContent = 'Paste a GalliMap access token first.';
+        galliMapToast('warning', 'Paste a GalliMap access token in the GalliMap 360 card first.');
         return;
       }
       if (statusEl) statusEl.textContent = 'Looking for the nearest 360 image\u2026';
@@ -4443,6 +4462,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
           if (!picked.ok) {
             var why = picked.message || 'no 360 image within ' + galliMapRadius() + ' m';
             if (statusEl) statusEl.textContent = 'Not found: ' + why;
+            galliMapToast('info', 'No 360 image here: ' + why);
             return;
           }
 
@@ -4461,7 +4481,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
           // The text is built once, in galliMapStatusMessage(). Do not re-interpret the
           // status here: a 404 is a rejected request (bad URL or token), never an empty
           // area.
-          if (statusEl) statusEl.textContent = 'Could not load: ' + (e.message || e);
+          var failText = 'Could not load: ' + (e.message || e);
+          if (statusEl) statusEl.textContent = failText;
+          galliMapToast('error', failText, 8000);
           console.warn(scriptName + ': GalliMap lookup failed', e);
         });
     }
@@ -6245,6 +6267,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       if (on) {
         galliMapPinSetPosition(galliMapPinCurrent() || wmeSDK.Map.getMapCenter() || { lon: 85.324, lat: 27.717 });
         galliStatus.textContent = 'Pin placed. Click the map to move it.';
+        galliMapToast('info', 'GalliMap pin on - click the map to move it.');
       } else {
         galliMapPinRemove();
         galliStatus.textContent = 'Pin off.';
@@ -6284,6 +6307,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         var center = wmeSDK.Map.getMapCenter();
         if (!center) {
           galliStatus.textContent = 'Map centre not available yet.';
+          galliMapToast('warning', 'Map centre not available yet - pan the map and try again.');
           return;
         }
         galliMapShowAt(center, galliStatus);
@@ -6295,8 +6319,10 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       });
 
     galliTokenInput.addEventListener('change', function () {
-      npwSaveString(GALLIMAP_TOKEN_KEY, galliTokenInput.value.trim());
-      galliStatus.textContent = galliTokenInput.value.trim() ? 'Token saved.' : 'Token cleared.';
+      var saved = galliTokenInput.value.trim();
+      npwSaveString(GALLIMAP_TOKEN_KEY, saved);
+      galliStatus.textContent = saved ? 'Token saved.' : 'Token cleared.';
+      galliMapToast(saved ? 'success' : 'info', saved ? 'GalliMap token saved.' : 'GalliMap token cleared.');
     });
     galliRadiusInput.addEventListener('change', function () {
       npwSaveString(GALLIMAP_RADIUS_KEY, galliRadiusInput.value);
