@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.10.08.003
+// @version       2026.10.09.011
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -9,6 +9,8 @@
 // @license       MIT
 // @grant         GM_xmlhttpRequest
 // @grant         unsafeWindow
+// @grant         GM_addStyle
+// @grant         GM_getResourceText
 // @require       https://greasyfork.org/scripts/560385/code/WazeToastr.js
 // @require       https://update.greasyfork.org/scripts/516445/1480246/Make%20GM%20xhr%20more%20parallel%20again.js
 // @require       https://update.greasyfork.org/scripts/565546/1750869/Preeti%20to%20Unicode%20Converter.js
@@ -25,8 +27,11 @@
 // @connect       kid4rm90s.github.io
 // @connect       docs.google.com
 // @require       https://update.greasyfork.org/scripts/597539/WME%20Key%20Codes.js
+// @require       https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js
+// @resource      pannellumCss https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css
 // @connect       githubusercontent.com
 // @connect       raw.githubusercontent.com
+// @connect       image-init.gallimap.com
 // @downloadURL   https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js
 // @updateURL   https://raw.githubusercontent.com/kid4rm90s/Nepali-GIS-Layers/main/Beta-Nepali-GIS-layers.user.js
 
@@ -44,6 +49,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 /* global require */
 /* global GeoKMLer */
 /* global WMEKeyCodes */
+/* global pannellum */
 
 (function main() {
   ('use strict');
@@ -90,6 +96,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     layerOffsets: '_wme_nepali_wms_layer_offsets', // { layerName: { east, north } } in metres
     postal: '_wme_nepali_wms_postal',            // { wardCodes, autoLoad, subCity, provinceSuffix }
     closures: '_wme_nepali_wms_closures',        // { enabled: boolean }
+    gallimapToken: '_wme_nepali_wms_gallimap_token',   // bare GalliMap access token (string)
+    gallimapRadius: '_wme_nepali_wms_gallimap_radius', // bare search radius in metres (string)
+    gallimapViewer: '_wme_nepali_wms_gallimap_viewer', // { width, height, left, top } of the 360 overlay
     layerTogglers: 'WMSLayers',                  // { togglerKey: boolean } - pre-existing key
   };
 
@@ -160,6 +169,154 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     } catch (e) {
       // Ignore - see npwSaveJson.
     }
+  }
+
+  /* ==================================================================
+     GALLIMAP 360 STREET VIEW
+     Two token-gated endpoints:
+       GET /api/v1/streetmarker/getnearestimage/{lat},{lng}/{threshold}?accessToken=…
+         -> JSON envelope describing the nearest captured panorama
+       GET /api/v1/streetview/{yy-mm-dd}/{seq}/{seq}_…_NNNNNN.jpg?accessToken=…
+         -> the equirectangular JPEG itself (delivered in the envelope as data.imgurl)
+     The token is the user's own and is never shipped in the script source: it is
+     pasted into the "GalliMap 360" card once and kept in localStorage.
+     ================================================================== */
+  var GALLIMAP_BASE = 'https://image-init.gallimap.com/api/v1';
+  var GALLIMAP_TOKEN_KEY = '_wme_nepali_wms_gallimap_token';
+  var GALLIMAP_RADIUS_KEY = '_wme_nepali_wms_gallimap_radius';
+  var GALLIMAP_DEFAULT_RADIUS = 20;
+
+  /** The GalliMap access token, or '' when the user has not set one. */
+  function galliMapToken() {
+    return npwLoadString(GALLIMAP_TOKEN_KEY, '').trim();
+  }
+
+  /** The search radius in metres, falling back to the default. */
+  function galliMapRadius() {
+    var n = Number(npwLoadString(GALLIMAP_RADIUS_KEY, ''));
+    return isFinite(n) && n > 0 ? n : GALLIMAP_DEFAULT_RADIUS;
+  }
+
+  /**
+   * Turns a non-2xx GalliMap response into a message a mapper can act on.
+   * Prefers the API's own `message`; falls back to a status-specific default.
+   * @param {number} status the HTTP status code
+   * @param {?Object} body the parsed JSON body, or null when it did not parse
+   * @returns {string}
+   */
+  function galliMapStatusMessage(status, body) {
+    var apiMessage = body && typeof body === 'object' ? String(body.message || '').trim() : '';
+    if (status === 401 || status === 403) {
+      return apiMessage || 'GalliMap rejected the access token (HTTP ' + status + '). Check the token in this card.';
+    }
+    if (status === 404) {
+      // Per GalliMap's docs a genuine "nothing here" is HTTP 200 with success:false,
+      // so a 404 means the REQUEST was rejected - usually the token. Do not claim
+      // "no coverage": that is now known to be wrong and sends users down the
+      // wrong path. Report the API's own message, or the URL we actually sent.
+      return apiMessage || ('GalliMap rejected the lookup (HTTP 404). ' + (body && body.__url ? 'URL: ' + body.__url : ''));
+    }
+    return apiMessage || 'GalliMap HTTP ' + status;
+  }
+
+  // JSON GET through GM_xmlhttpRequest (no CORS limits), mirroring npGisFetchText.
+  function galliMapFetchJson(url, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url,
+        headers: { Accept: 'application/json' },
+        timeout: timeoutMs || 20000,
+        onload: function (response) {
+          var parsed = null;
+          try {
+            parsed = JSON.parse(response.responseText);
+          } catch (e) {
+            parsed = null; // a non-JSON body is only fatal on a 2xx (see below)
+          }
+          if (response.status < 200 || response.status >= 300) {
+            // GalliMap's docs say a real "no image" is HTTP 200 with success:false,
+            // so a non-2xx here is a REJECTED REQUEST, not an empty result. Log the
+            // exact URL and body once so the cause is visible instead of guessed.
+            console.warn(scriptName + ': GalliMap HTTP ' + response.status, { url: url, body: response.responseText });
+            if (parsed && typeof parsed === 'object') parsed.__url = url;
+            var err = new Error(galliMapStatusMessage(response.status, parsed));
+            err.gallimapStatus = response.status;
+            reject(err);
+            return;
+          }
+          if (parsed === null) {
+            reject(new Error('GalliMap returned a non-JSON response'));
+            return;
+          }
+          resolve(parsed);
+        },
+        onerror: function () {
+          reject(new Error('GalliMap network error'));
+        },
+        ontimeout: function () {
+          reject(new Error('GalliMap request timeout'));
+        },
+      });
+    });
+  }
+
+  // Nearest capture to a WGS84 lon/lat. GalliMap's own site requests this route with a
+  // LITERAL comma between the two numbers:
+  //   /streetmarker/getnearestimage/27.712649267492935,85.32865297387235/20?accessToken=…
+  // The `%2C` spelling in the docs prose is NOT accepted by this route (it 404s), so the
+  // pair is sent unescaped. The accessToken is sent RAW too: percent-encoding corrupts
+  // any token containing + / = (base64/JWT).
+  function galliMapNearestImage(lon, lat) {
+    var token = galliMapToken();
+    if (!token) return Promise.reject(new Error('GalliMap token not set (see the GalliMap 360 card).'));
+    var url =
+      GALLIMAP_BASE + '/streetmarker/getnearestimage/' +
+      lat + ',' + lon + '/' + galliMapRadius() +
+      '?accessToken=' + token;
+    return galliMapFetchJson(url);
+  }
+
+  /**
+   * Unwraps the documented getnearestimage envelope:
+   *   { success, message, data: { image, folder, lat, lng, distance, imgurl } }
+   * A deployment that returns the data object directly is still accepted.
+   * @returns {{ok: boolean, message: string, url: string,
+   *            capture: {lon: number, lat: number}|null,
+   *            distance: number|null, image: string}}
+   */
+  function galliMapPickImage(payload) {
+    var body = payload || {};
+    // Documented envelope first; fall back to a flatter body if one is ever returned.
+    var data = body.data && typeof body.data === 'object' ? body.data : body;
+    var ok = body.success !== false; // an absent `success` is treated as OK
+
+    var url = data.imgurl || data.url || data.imageUrl || data.image_url || data.streetImage || data.imagePath || '';
+    // GalliMap returns a root-relative path in some deployments and an absolute URL in
+    // others (the site's own imagery URL is absolute, e.g.
+    // /api/v1/streetview/2023_02_01/…/….jpg?accessToken=…). Resolve root-relative ones
+    // against the image host, and if the URL carries no accessToken of its own, append
+    // the user's so the <img>/Pannellum load is not rejected with 401.
+    if (url && url.charAt(0) === '/') url = 'https://image-init.gallimap.com' + url;
+    if (url && url.indexOf('accessToken=') === -1) {
+      var imgToken = galliMapToken();
+      if (imgToken) url += (url.indexOf('?') === -1 ? '?' : '&') + 'accessToken=' + imgToken;
+    }
+
+    var lat = Number(data.lat);
+    var lon = Number(data.lng);
+    var capture = isFinite(lat) && isFinite(lon) ? { lon: lon, lat: lat } : null;
+
+    var distance = Number(data.distance);
+
+    return {
+      ok: ok && !!url,
+      message: body.message || (ok ? '' : 'No 360 image found'),
+      url: url,
+      capture: capture,
+      distance: isFinite(distance) ? distance : null,
+      image: String(data.image || ''),
+    };
   }
 
   /* ==================================================================
@@ -2966,6 +3123,12 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     });
   }
 
+  // The GalliMap pin helpers live inside init()'s scope, which syncAllTogglerVisibility
+  // (declared out here) cannot see - function declarations hoist within their own
+  // function only. init() assigns its pin-visibility function to this hook so the master
+  // checkbox can still hide the pin; it stays null until init() has run.
+  var syncGalliMapPinVisibilityHook = null;
+
   function closureCountText() {
     if (!closureFeed) return 'not loaded';
     return closureFeed.features.length + ' CLOSED closure' + (closureFeed.features.length === 1 ? '' : 's');
@@ -3657,9 +3820,17 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     // that wmeSDK.Map.getPixelFromLonLat() returns - no page overflow possible.
     function positionPopupInViewport(popup, lonLat, offsetX) {
       const MARGIN = 8;
-      // A tall popup scrolls internally instead of growing past the viewport.
-      popup.style.maxHeight = Math.max(120, window.innerHeight - MARGIN * 2) + 'px';
-      popup.style.overflowY = 'auto';
+      // The GalliMap viewer owns its own overflow (the panorama must not scroll) and,
+      // once the user has dragged it, owns its own position - re-anchoring it on every
+      // open would throw away the placement they just chose. Other popups keep the
+      // scrolling/clamping behaviour below.
+      const isGalliViewer = popup.dataset && popup.dataset.npwInteractive === '1';
+      const userPlaced = isGalliViewer && popup.dataset.npwDragged === '1';
+      if (!isGalliViewer) {
+        // A tall popup scrolls internally instead of growing past the viewport.
+        popup.style.maxHeight = Math.max(120, window.innerHeight - MARGIN * 2) + 'px';
+        popup.style.overflowY = 'auto';
+      }
       // Make it measurable without showing a jump.
       popup.style.display = 'block';
       popup.style.visibility = 'hidden';
@@ -3685,9 +3856,614 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       }
 
       // Final clamp keeps the popup inside the viewport in every direction.
+      // A viewer the user has positioned keeps its own left/top, only clamped so it
+      // cannot end up entirely off-screen (e.g. after the window is resized).
+      if (userPlaced) {
+        const curLeft = parseFloat(popup.style.left);
+        const curTop = parseFloat(popup.style.top);
+        if (isFinite(curLeft) && isFinite(curTop)) {
+          popup.style.left = Math.min(Math.max(curLeft, -width + 40), maxLeft) + 'px';
+          popup.style.top = Math.min(Math.max(curTop, 0), maxTop) + 'px';
+          popup.style.visibility = 'visible';
+          return;
+        }
+      }
       popup.style.left = Math.min(Math.max(left, MARGIN), maxLeft) + 'px';
       popup.style.top = Math.min(Math.max(top, MARGIN), maxTop) + 'px';
       popup.style.visibility = 'visible';
+    }
+
+    /* ------------------------------------------------------------------
+       GalliMap 360 viewer overlay
+       One Pannellum instance at a time: re-pointing a live instance via loadScene()
+       throws when its container was re-parented mid-pan, so a new image always tears
+       the old instance down first. destroy() is also what releases the WebGL context.
+       ------------------------------------------------------------------ */
+    var GALLIMAP_VIEWER_ID = 'npw-gallimap-viewer';
+    var GALLIMAP_VIEWER_HOST_ID = 'npw-gallimap-viewer-host';
+    var GALLIMAP_VIEWER_STORAGE_KEY = '_wme_nepali_wms_gallimap_viewer';
+    var GALLIMAP_VIEWER_MIN_W = 320;
+    var GALLIMAP_VIEWER_MIN_H = 240;
+
+    /* ------------------------------------------------------------------
+       GalliMap drop-pin
+       Places a single movable marker on the map; a click moves it and
+       fetches the nearest 360 capture once. Deliberately NOT fetches on
+       pointer-move: every getnearestimage call is a metered request on the
+       user's own token, and a drag would fire dozens per gesture.
+       ------------------------------------------------------------------ */
+    var GALLIMAP_PIN_LAYER = 'NP_GalliMap_Pin';
+    var GALLIMAP_PIN_STORAGE_KEY = '_wme_nepali_wms_gallimap_pin';
+    var GALLIMAP_PIN_ENABLED_KEY = '_wme_nepali_wms_gallimap_pin_on';
+    // A classic teardrop pin, inline SVG so it needs no @connect and no external file.
+    var GALLIMAP_PIN_ICON =
+      'data:image/svg+xml;base64,' +
+      btoa(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36">' +
+          '<path d="M14 0C6.3 0 0 6.3 0 14c0 10.5 14 22 14 22s14-11.5 14-22C28 6.3 21.7 0 14 0z" ' +
+          'fill="#e53935" stroke="#fff" stroke-width="2"/>' +
+          '<circle cx="14" cy="13.5" r="5" fill="#fff"/></svg>'
+      );
+    var _galliMapPinLonLat = null;
+    var _galliMapPinBuilt = false;
+
+    /** Reads the remembered pin position, or null. */
+    function galliMapPinPosition() {
+      var saved = npwLoadJson(GALLIMAP_PIN_STORAGE_KEY, null);
+      if (saved && isFinite(Number(saved.lon)) && isFinite(Number(saved.lat))) {
+        return { lon: Number(saved.lon), lat: Number(saved.lat) };
+      }
+      return null;
+    }
+
+    /** Draws the pin at the given point (or moves the existing one). */
+    function galliMapPinSetPosition(lonLat) {
+      _galliMapPinLonLat = { lon: Number(lonLat.lon), lat: Number(lonLat.lat) };
+      npwSaveJson(GALLIMAP_PIN_STORAGE_KEY, _galliMapPinLonLat);
+      if (!_galliMapPinBuilt) {
+        wmeSDK.Map.addLayer({
+          layerName: GALLIMAP_PIN_LAYER,
+          zIndexing: true,
+          styleRules: [
+            {
+              style: {
+                externalGraphic: GALLIMAP_PIN_ICON,
+                graphicWidth: 28,
+                graphicHeight: 36,
+                // The pin's tip, not its middle, marks the point.
+                graphicYOffset: -18,
+                graphicOpacity: 1,
+                cursor: 'pointer',
+                title: 'GalliMap 360 lookup point',
+              },
+            },
+          ],
+        });
+        wmeSDK.Events.trackLayerEvents({ layerName: GALLIMAP_PIN_LAYER });
+        _galliMapPinBuilt = true;
+      }
+      wmeSDK.Map.removeAllFeaturesFromLayer({ layerName: GALLIMAP_PIN_LAYER });
+      wmeSDK.Map.addFeatureToLayer({
+        layerName: GALLIMAP_PIN_LAYER,
+        feature: {
+          id: 'gallimap-pin',
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [_galliMapPinLonLat.lon, _galliMapPinLonLat.lat] },
+          properties: {},
+        },
+      });
+      try {
+        wmeSDK.Map.setLayerZIndex({ layerName: GALLIMAP_PIN_LAYER, zIndex: ZIndexes.popup + 30 });
+      } catch (e) {
+        // zIndexing not supported for this layer - not fatal.
+      }
+      // Respect the master layer checkbox on creation, so a pin added while the master
+      // switch is off does not appear until that switch is turned on.
+      syncGalliMapPinVisibility();
+    }
+
+    /** Removes the pin layer entirely. */
+    function galliMapPinRemove() {
+      if (!_galliMapPinBuilt) return;
+      try { wmeSDK.Events.stopLayerEventsTracking({ layerName: GALLIMAP_PIN_LAYER }); } catch (e) { /* never tracked */ }
+      try { wmeSDK.Map.removeLayer({ layerName: GALLIMAP_PIN_LAYER }); } catch (e) { /* already gone */ }
+      _galliMapPinBuilt = false;
+    }
+
+    // The pin follows the script's master layer-switcher checkbox, like every other layer
+    // the script draws. Without this the master switch would hide the other layers and
+    // leave the pin stranded on the map.
+    function syncGalliMapPinVisibility() {
+      if (!_galliMapPinBuilt) return;
+      try {
+        wmeSDK.Map.setLayerVisibility({ layerName: GALLIMAP_PIN_LAYER, visibility: !!masterLayerToggleOn });
+      } catch (e) {
+        // Layer not present yet - nothing to sync.
+      }
+    }
+    // Publish it for syncAllTogglerVisibility, which is declared outside init() and
+    // therefore cannot reference this function directly.
+    syncGalliMapPinVisibilityHook = syncGalliMapPinVisibility;
+
+    /** The stored point, for re-opening the viewer without a re-placed pin. */
+    function galliMapPinCurrent() {
+      return _galliMapPinLonLat || galliMapPinPosition();
+    }
+
+    var _galliMapViewer = null;    // live Pannellum instance, or null
+    var _galliMapViewerUrl = null; // the panorama the instance is showing
+    var _pannellumCssInjected = false;
+
+    /** Injects Pannellum's stylesheet once, via GM_addStyle (WME's CSP blocks a <link>). */
+    function ensurePannellumStyles() {
+      if (_pannellumCssInjected) return;
+      _pannellumCssInjected = true;
+      try {
+        GM_addStyle(GM_getResourceText('pannellumCss'));
+      } catch (e) {
+        // No @resource block (an older install) - the viewer still works, just unstyled.
+        console.warn(scriptName + ': could not inject Pannellum CSS', e);
+      }
+    }
+
+    function pannellumAvailable() {
+      return typeof pannellum !== 'undefined' && pannellum && typeof pannellum.viewer === 'function';
+    }
+
+    // WME's CSP forces the shape of this loader:
+    //   connect-src 'self' <host allowlist>          <- no data:, no blob:, no gallimap host
+    //   img-src     'self' data: https: http: blob:  <- permissive
+    // Pannellum does not load the panorama through an <img>: it XHRs the URL and reads the
+    // body with FileReader, and XHR is governed by connect-src. So no URL we could hand it
+    // would work. Instead the bytes are fetched here with GM_xmlhttpRequest (privileged,
+    // outside the page CSP), turned into a blob: URL (img-src permits blob:) and loaded
+    // into an <img>; Pannellum receives that already-loaded image via `dynamic` mode and
+    // uploads it to the texture directly, with no XHR of its own.
+    var _galliMapImageCache = {}; // panorama URL -> loaded HTMLImageElement
+
+    // @param {string} url the panorama JPEG URL
+    // @param {Function} callback callback(img|null, error|null)
+    function loadGalliMapImage(url, callback) {
+      if (_galliMapImageCache[url]) {
+        callback(_galliMapImageCache[url], null);
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url,
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        onload: function (response) {
+          var data = response.response;
+          var isEmpty = !data || (data instanceof ArrayBuffer ? data.byteLength === 0 : data.size === 0);
+          if (response.status < 200 || response.status >= 300 || isEmpty) {
+            callback(null, new Error('GalliMap image HTTP ' + response.status));
+            return;
+          }
+          var blob = data instanceof Blob ? data : new Blob([data], { type: 'image/jpeg' });
+          var objectUrl = URL.createObjectURL(blob);
+          var img = new Image();
+          img.onload = function () {
+            _galliMapImageCache[url] = img;
+            callback(img, null);
+          };
+          img.onerror = function () {
+            URL.revokeObjectURL(objectUrl);
+            callback(null, new Error('GalliMap image could not be decoded'));
+          };
+          img.src = objectUrl; // img-src allows blob:, so this load is not blocked
+        },
+        onerror: function () {
+          callback(null, new Error('GalliMap image network error'));
+        },
+        ontimeout: function () {
+          callback(null, new Error('GalliMap image request timeout'));
+        },
+      });
+    }
+
+    /**
+     * Opens (or re-clamps) the floating 360 viewer.
+     * The panorama is preloaded into an <img> first (via a blob: URL, which img-src
+     * allows) and handed to Pannellum in dynamic mode, so Pannellum's own XHR - which
+     * WME's connect-src blocks for every scheme - is never attempted.
+     * @param {{lon: number, lat: number}} lonLat anchor for the popup
+     * @param {string} imageUrl the equirectangular JPEG
+     * @param {string} [meta] status line under the viewer
+     * @param {number} [initialYaw] starting heading in degrees
+     */
+    function showGalliMap360Viewer(lonLat, imageUrl, meta, initialYaw) {
+      // Already showing this panorama: re-place the popup, no re-fetch.
+      if (_galliMapViewerUrl === imageUrl && _galliMapViewer) {
+        var liveMeta = document.getElementById(GALLIMAP_VIEWER_ID + '-meta');
+        if (liveMeta) liveMeta.textContent = meta || '';
+        var livePopup = document.getElementById(GALLIMAP_VIEWER_ID);
+        if (livePopup) positionPopupInViewport(livePopup, lonLat, 10);
+        return;
+      }
+      loadGalliMapImage(imageUrl, function (img, err) {
+        if (!img) {
+          console.warn(scriptName + ': could not fetch the GalliMap panorama', err);
+          var failedPopup = ensureGalliMapViewerPopup();
+          if (failedPopup) {
+            failedPopup.textContent = 'Could not load the 360 image (' + (err && err.message ? err.message : err) + ').';
+            failedPopup.style.color = '#c62828';
+            failedPopup.style.padding = '10px';
+            positionPopupInViewport(failedPopup, lonLat, 10);
+          }
+          return;
+        }
+        renderGalliMapPanorama(lonLat, imageUrl, img, meta, initialYaw);
+      });
+    }
+
+    /** Creates the viewer popup shell if absent and returns it. */
+    function ensureGalliMapViewerPopup() {
+      var popup = document.getElementById(GALLIMAP_VIEWER_ID);
+      if (popup) return popup;
+      popup = document.createElement('div');
+      popup.id = GALLIMAP_VIEWER_ID;
+      popup.style.position = 'fixed';
+      popup.style.zIndex = 9999;
+      // WME CSS variables keep the overlay readable in both light and dark themes.
+      popup.style.background = 'var(--background_default, #fff)';
+      popup.style.color = 'var(--content_default, #333)';
+      popup.style.border = '2px solid var(--hairline, #999)';
+      popup.style.borderRadius = '8px';
+      popup.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)';
+      popup.style.padding = '6px';
+      // Restore the last size the user chose, so the box does not reset every open.
+      var saved = npwLoadJson(GALLIMAP_VIEWER_STORAGE_KEY, null) || {};
+      // border-box so style.width equals offsetWidth: the resize handler reads
+      // offsetWidth and writes style.width, and with content-box those two disagree
+      // by the border+padding on every gesture, drifting the box each time.
+      popup.style.boxSizing = 'border-box';
+      popup.style.width = (Number(saved.width) > 0 ? Number(saved.width) : 480) + 'px';
+      popup.dataset.npwHeight = String(Number(saved.height) > 0 ? Number(saved.height) : 280);
+      popup.style.minWidth = GALLIMAP_VIEWER_MIN_W + 'px';
+      popup.style.minHeight = GALLIMAP_VIEWER_MIN_H + 'px';
+      popup.style.maxWidth = '95vw';
+      popup.style.maxHeight = '95vh';
+      popup.style.pointerEvents = 'auto';
+      popup.style.fontSize = '11px';
+      popup.style.fontFamily = 'inherit';
+      // The popup itself must not scroll (the panorama must fill it); the meta line
+      // has its own wrapping instead.
+      popup.style.overflow = 'hidden';
+      // Marks the popup as the GalliMap viewer for positionPopupInViewport: it opts out
+      // of the shared popups' overflow/max-height, and once dragged it keeps its own
+      // position instead of being re-anchored on every open.
+      popup.dataset.npwInteractive = '1';
+      document.body.appendChild(popup);
+      return popup;
+    }
+
+    /**
+     * Persists the viewer geometry. Only width/height are stored - position is
+     * re-derived from the anchor each open unless the user has dragged it.
+     */
+    function saveGalliMapViewerSize() {
+      var popup = document.getElementById(GALLIMAP_VIEWER_ID);
+      if (!popup) return;
+      npwSaveJson(GALLIMAP_VIEWER_STORAGE_KEY, {
+        width: Math.round(popup.offsetWidth),
+        height: Math.round(Number(popup.dataset.npwHeight) || 280),
+      });
+    }
+
+    /**
+     * Ensures the resize grip exists. Separate from the event wiring because the grip is
+     * a DOM child of the popup, and renderGalliMapPanorama replaces the popup's innerHTML
+     * whenever a different panorama is drawn - which deletes the grip. Re-adding it here
+     * on every render is what keeps the box resizable after the first image.
+     */
+    function ensureGalliMapResizeGrip(popup) {
+      if (popup.querySelector(':scope > .npw-gallimap-resize')) return;
+      var grip = document.createElement('div');
+      grip.className = 'npw-gallimap-resize';
+      grip.title = 'Drag to resize';
+      grip.style.position = 'absolute';
+      grip.style.right = '0';
+      grip.style.bottom = '0';
+      grip.style.width = '16px';
+      grip.style.height = '16px';
+      grip.style.cursor = 'nwse-resize';
+      grip.style.zIndex = '3';
+      // Two diagonal strokes drawn with a CSS gradient - no image, no CSP concern.
+      grip.style.background =
+        'linear-gradient(135deg, transparent 0 45%, var(--hairline,#999) 45% 55%, transparent 55%),' +
+        'linear-gradient(135deg, transparent 0 70%, var(--hairline,#999) 70% 80%, transparent 80%)';
+      grip.addEventListener('pointerdown', function (evt) {
+        if (evt.button !== 0) return;
+        evt.preventDefault();
+        evt.stopPropagation();
+        var startX = evt.clientX;
+        var startY = evt.clientY;
+        var startW = popup.offsetWidth;
+        var startH = Number(popup.dataset.npwHeight) || 280;
+
+        function onMove(e) {
+          var w = startW + (e.clientX - startX);
+          var h = startH + (e.clientY - startY);
+          w = Math.max(GALLIMAP_VIEWER_MIN_W, Math.min(w, window.innerWidth * 0.95));
+          h = Math.max(GALLIMAP_VIEWER_MIN_H, Math.min(h, window.innerHeight * 0.95 - 60));
+          popup.style.width = Math.round(w) + 'px';
+          popup.dataset.npwHeight = String(Math.round(h));
+          applyGalliMapViewerHeight(popup);
+          resizeGalliMapViewerCanvas();
+        }
+        function onUp() {
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', onUp);
+          saveGalliMapViewerSize();
+          resizeGalliMapViewerCanvas();
+        }
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+      });
+      popup.appendChild(grip);
+    }
+
+    /**
+     * Wires dragging (by the title bar) and ensures the resize grip exists.
+     * Both use pointer events with a document-level move/up pair, so the pointer may leave
+     * the popup mid-gesture without the drag sticking.
+     * Pannellum keeps its own mouse handling on the panorama, so the drag handle is
+     * deliberately the header only; resizing re-measures the canvas afterwards.
+     *
+     * The header and grip are both recreated by popup.innerHTML on every new panorama, so
+     * they must be re-established on EVERY call. Anything inside that innerHTML needs its
+     * wiring guarded on the ELEMENT (see ensureGalliMapHeaderDrag), never on the popup -
+     * a popup-level guard stops re-wiring from the second render onwards.
+     */
+    function makeGalliMapViewerInteractive(popup, header) {
+      ensureGalliMapResizeGrip(popup);
+      ensureGalliMapHeaderDrag(popup, header);
+    }
+
+    /**
+     * Attaches the drag handler to a header element, once per element. A new header is
+     * built for each panorama, so this runs again for each - but never twice for the
+     * same node.
+     */
+    function ensureGalliMapHeaderDrag(popup, header) {
+      if (!header || header.dataset.npwDragWired === '1') return;
+      header.dataset.npwDragWired = '1';
+
+      header.style.cursor = 'move';
+      header.style.userSelect = 'none';
+      header.addEventListener('pointerdown', function (evt) {
+        // Ignore the close button, which lives inside the header.
+        if (evt.target && evt.target.id === GALLIMAP_VIEWER_ID + '-close') return;
+        if (evt.button !== 0) return;
+        evt.preventDefault();
+        var startX = evt.clientX;
+        var startY = evt.clientY;
+        // Read the LIVE position, not offsetLeft: a previous open may have positioned the
+        // popup with inline left/top that offsetLeft does not reflect after a re-render.
+        var startLeft = parseFloat(popup.style.left);
+        var startTop = parseFloat(popup.style.top);
+        if (!isFinite(startLeft)) startLeft = popup.offsetLeft;
+        if (!isFinite(startTop)) startTop = popup.offsetTop;
+        popup.dataset.npwDragged = '1';
+
+        function onMove(e) {
+          var left = startLeft + (e.clientX - startX);
+          var top = startTop + (e.clientY - startY);
+          // Keep at least a corner on screen so it can never be dragged away.
+          var maxLeft = window.innerWidth - 40;
+          var maxTop = window.innerHeight - 30;
+          popup.style.left = Math.min(Math.max(left, -popup.offsetWidth + 40), maxLeft) + 'px';
+          popup.style.top = Math.min(Math.max(top, 0), maxTop) + 'px';
+        }
+        function onUp() {
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', onUp);
+        }
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+      });
+    }
+
+    /** Applies the stored target height to the panorama host (popup height minus chrome). */
+    function applyGalliMapViewerHeight(popup) {
+      var host = document.getElementById(GALLIMAP_VIEWER_HOST_ID);
+      if (!host) return;
+      var total = Number(popup.dataset.npwHeight) || 280;
+      // Chrome = header (~18px) + meta line (~16px) + padding/border (~16px).
+      var chrome = 50;
+      host.style.height = Math.max(120, total - chrome) + 'px';
+    }
+
+    /** Asks Pannellum to re-measure after a resize, if an instance is live. */
+    function resizeGalliMapViewerCanvas() {
+      if (_galliMapViewer && typeof _galliMapViewer.resize === 'function') {
+        try {
+          _galliMapViewer.resize();
+        } catch (e) {
+          // Not fatal - the next user interaction redraws anyway.
+        }
+      }
+    }
+
+    /**
+     * Draws the panorama from an already-loaded image.
+     * @param {{lon: number, lat: number}} lonLat anchor for the popup
+     * @param {string} imageUrl the ORIGINAL panorama URL (cache key / identity)
+     * @param {HTMLImageElement} img the preloaded panorama image
+     * @param {string} [meta] status line under the viewer
+     * @param {number} [initialYaw] starting heading in degrees
+     */
+    function renderGalliMapPanorama(lonLat, imageUrl, img, meta, initialYaw) {
+      var popup = ensureGalliMapViewerPopup();
+
+      // Same image already on screen: leave the instance alone, just re-place the popup.
+      if (_galliMapViewerUrl === imageUrl && _galliMapViewer) {
+        var sameMeta = document.getElementById(GALLIMAP_VIEWER_ID + '-meta');
+        if (sameMeta) sameMeta.textContent = meta || '';
+        popup.style.display = 'block';
+        positionPopupInViewport(popup, lonLat, 10);
+        return;
+      }
+
+      // Pannellum unavailable: fall back to a plain <img> rather than a black box.
+      if (!pannellumAvailable()) {
+        popup.innerHTML =
+          '<a href="#" id="' + GALLIMAP_VIEWER_ID + '-close" ' +
+            'style="position:absolute;top:0;right:6px;font-size:20px;text-decoration:none;color:#c62828;z-index:3;">&times;</a>' +
+          '<div id="' + GALLIMAP_VIEWER_ID + '-header" ' +
+            'style="font-weight:600;margin:0 0 4px;padding-right:20px;">GalliMap Street View</div>' +
+          '<div style="overflow:auto;">' +
+            '<img id="' + GALLIMAP_VIEWER_ID + '-img" alt="GalliMap street view" ' +
+              'style="display:block;width:100%;height:auto;border-radius:4px;background:#000;">' +
+          '</div>';
+        // Assign .src rather than interpolating into innerHTML, so a hostile URL
+        // cannot escape the attribute. img.src is the blob: URL created from the
+        // privileged fetch, not the raw GalliMap host (which the CSP blocks).
+        document.getElementById(GALLIMAP_VIEWER_ID + '-img').src = img.src;
+        document.getElementById(GALLIMAP_VIEWER_ID + '-close').onclick = function (e) {
+          e.preventDefault();
+          popup.style.display = 'none';
+        };
+        makeGalliMapViewerInteractive(popup, document.getElementById(GALLIMAP_VIEWER_ID + '-header'));
+        _galliMapViewerUrl = imageUrl;
+        positionPopupInViewport(popup, lonLat, 10);
+        return;
+      }
+
+      ensurePannellumStyles();
+
+      // Release the previous WebGL context before its container is replaced.
+      if (_galliMapViewer) {
+        try {
+          _galliMapViewer.destroy();
+        } catch (e) {
+          // already gone
+        }
+        _galliMapViewer = null;
+      }
+      _galliMapViewerUrl = null;
+
+      popup.innerHTML =
+        '<a href="#" id="' + GALLIMAP_VIEWER_ID + '-close" ' +
+          'style="position:absolute;top:0;right:6px;font-size:20px;text-decoration:none;color:#c62828;z-index:3;">&times;</a>' +
+        '<div id="' + GALLIMAP_VIEWER_ID + '-header" ' +
+          'style="font-weight:600;margin:0 0 4px;padding-right:20px;">GalliMap 360&deg; Street View ' +
+          '<span style="font-weight:400;font-size:10px;opacity:0.7;">(drag header to move &middot; corner to resize)</span></div>' +
+        '<div id="' + GALLIMAP_VIEWER_HOST_ID + '" ' +
+          'style="display:block;width:100%;border-radius:4px;background:#000;overflow:hidden;"></div>' +
+        '<div id="' + GALLIMAP_VIEWER_ID + '-meta" ' +
+          'style="margin-top:4px;font-size:10px;color:var(--content_p2,#666);">' + (meta || '') + '</div>';
+
+      document.getElementById(GALLIMAP_VIEWER_ID + '-close').onclick = function (e) {
+        e.preventDefault();
+        popup.style.display = 'none';
+      };
+
+      // Size the panorama host from the remembered height before Pannellum measures it -
+      // the renderer reads the container's clientHeight when it initialises.
+      applyGalliMapViewerHeight(popup);
+      makeGalliMapViewerInteractive(popup, document.getElementById(GALLIMAP_VIEWER_ID + '-header'));
+
+      // Pannellum samples the container's clientWidth/clientHeight when it builds the
+      // renderer, so the popup must be visible and laid out first. The host has just been
+      // created by the innerHTML above, and the popup may still be display:none from a
+      // previous close - measuring a zero-sized box yields a blank canvas.
+      popup.style.display = 'block';
+      var host = document.getElementById(GALLIMAP_VIEWER_HOST_ID);
+      void (host && host.offsetWidth);
+      void (host && host.offsetHeight);
+
+      try {
+        _galliMapViewer = pannellum.viewer(GALLIMAP_VIEWER_HOST_ID, {
+          type: 'equirectangular',
+          // Both flags are required. Pannellum starts its renderer only via
+          // `b.dynamic && Ma && (P=b.panorama, pa())`, where Ma is dynamicUpdate; with
+          // `dynamic` alone the built-in XHR is correctly skipped but the renderer never
+          // starts, so the load handler never fires and the loading box never clears.
+          dynamic: true,
+          dynamicUpdate: true,
+          panorama: img,
+          autoLoad: true,
+          compass: true,
+          showControls: true,
+          // Fullscreening inside WME's sidebar is a trap - leave the control out.
+          showFullscreenCtrl: false,
+          hfov: 100,
+          minHfov: 50,
+          maxHfov: 120,
+          yaw: typeof initialYaw === 'number' ? initialYaw : 0,
+          pitch: 0,
+          backgroundColor: [0, 0, 0],
+        });
+        _galliMapViewerUrl = imageUrl;
+      } catch (e) {
+        console.error(scriptName + ': Pannellum could not render the panorama', e);
+        // A bad JPEG or a WebGL init failure - leave a readable message, not a dead box.
+        var failedHost = document.getElementById(GALLIMAP_VIEWER_HOST_ID);
+        if (failedHost) {
+          failedHost.style.display = 'flex';
+          failedHost.style.alignItems = 'center';
+          failedHost.style.justifyContent = 'center';
+          failedHost.textContent = 'Could not render the 360 image (' + (e.message || e) + ').';
+          failedHost.style.color = '#ff8080';
+        }
+      }
+
+      positionPopupInViewport(popup, lonLat, 10);
+    }
+
+    /** Hides the viewer and releases its WebGL context. */
+    function hideGalliMap360Viewer() {
+      var popup = document.getElementById(GALLIMAP_VIEWER_ID);
+      if (popup) popup.style.display = 'none';
+      if (_galliMapViewer) {
+        try {
+          _galliMapViewer.destroy();
+        } catch (e) {
+          // already gone
+        }
+        _galliMapViewer = null;
+        _galliMapViewerUrl = null;
+      }
+    }
+
+    // Looks up the capture nearest `point` and shows it. The panorama is anchored at
+    // the CAPTURE, not the requested point - the two can be up to the threshold apart,
+    // so anchoring on the request would put the viewer where the photo is not from.
+    function galliMapShowAt(point, statusEl) {
+      if (!galliMapToken()) {
+        if (statusEl) statusEl.textContent = 'Paste a GalliMap access token first.';
+        return;
+      }
+      if (statusEl) statusEl.textContent = 'Looking for the nearest 360 image\u2026';
+      galliMapNearestImage(point.lon, point.lat)
+        .then(function (payload) {
+          var picked = galliMapPickImage(payload);
+          if (!picked.ok) {
+            var why = picked.message || 'no 360 image within ' + galliMapRadius() + ' m';
+            if (statusEl) statusEl.textContent = 'Not found: ' + why;
+            return;
+          }
+
+          var anchor = picked.capture || point;
+          var metaParts = [];
+          if (picked.image) metaParts.push(picked.image);
+          if (picked.distance !== null) metaParts.push(Math.round(picked.distance) + ' m away');
+          metaParts.push('captured at ' + anchor.lat.toFixed(5) + ', ' + anchor.lon.toFixed(5));
+
+          // No heading is published in the envelope, so the viewer opens facing the
+          // image's own equirectangular north (yaw 0); the compass control spins from there.
+          showGalliMap360Viewer(anchor, picked.url, metaParts.join(' \u2014 '), 0);
+          if (statusEl) statusEl.textContent = 'Showing ' + (picked.image || 'the nearest 360 image') + '.';
+        })
+        .catch(function (e) {
+          // The text is built once, in galliMapStatusMessage(). Do not re-interpret the
+          // status here: a 404 is a rejected request (bad URL or token), never an empty
+          // area.
+          if (statusEl) statusEl.textContent = 'Could not load: ' + (e.message || e);
+          console.warn(scriptName + ': GalliMap lookup failed', e);
+        });
     }
 
     // Helper: show popup at pixel position with content (custom HTML popup)
@@ -5421,6 +6197,171 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     startClosureFeedRefresh();
     if (closureEnabled) refreshClosureData();
 
+    // --- "GalliMap 360 Street View" - nearest captured panorama for the map centre.
+    // The token is the user's own and is stored in this browser only; Alt-clicking the
+    // map fetches the capture nearest the clicked point instead.
+    var galliCard = npwCard(layersPane, 'GalliMap 360\u00b0 Street View', {
+      collapsible: true,
+      storageKey: 'gallimap-streetview',
+    });
+    galliCard.id = 'GalliMapGroup';
+    var galliBody = galliCard.npwBody;
+
+    galliBody.appendChild(
+      npwCreate(
+        'div',
+        'npw-status',
+        'Shows the nearest GalliMap 360\u00b0 capture for the map centre. Requires a GalliMap access ' +
+          'token (paste it below - it is kept only in this browser). Switch "Drop pin on map" on and ' +
+          'click the map to move the lookup pin there; each click fetches once. Alt-click or ' +
+          'double-click the map also looks up that point directly.'
+      )
+    );
+
+    // Drop-pin switch. Off by default: with it off no marker is drawn and no map clicks
+    // are consumed, so the script stays out of the way until asked for.
+    var galliPinRow = npwCreate('div', 'npw-layer-item');
+    var galliPinCheckbox = document.createElement('input');
+    galliPinCheckbox.type = 'checkbox';
+    galliPinCheckbox.className = 'npw-checkbox';
+    galliPinCheckbox.id = 'galliMapPinToggle';
+    galliPinCheckbox.checked = npwLoadString(GALLIMAP_PIN_ENABLED_KEY, null) === 'true';
+    var galliPinLabel = npwCreate('label', 'npw-label', 'Drop pin on map');
+    galliPinLabel.title =
+      'Click the map to move the GalliMap pin and fetch the 360 capture nearest that point. ' +
+      'Each placement makes one request to GalliMap.';
+    galliPinLabel.addEventListener('click', function (e) {
+      if (e.target === galliPinCheckbox) return;
+      galliPinCheckbox.checked = !galliPinCheckbox.checked;
+      galliPinCheckbox.dispatchEvent(new Event('change'));
+    });
+    galliPinRow.appendChild(galliPinCheckbox);
+    galliPinRow.appendChild(galliPinLabel);
+    galliBody.appendChild(galliPinRow);
+
+    galliPinCheckbox.addEventListener('change', function () {
+      var on = galliPinCheckbox.checked;
+      npwSaveString(GALLIMAP_PIN_ENABLED_KEY, on ? 'true' : 'false');
+      if (on) {
+        galliMapPinSetPosition(galliMapPinCurrent() || wmeSDK.Map.getMapCenter() || { lon: 85.324, lat: 27.717 });
+        galliStatus.textContent = 'Pin placed. Click the map to move it.';
+      } else {
+        galliMapPinRemove();
+        galliStatus.textContent = 'Pin off.';
+      }
+    });
+
+    // Restore the pin on load if it was left switched on.
+    if (galliPinCheckbox.checked) {
+      var restoredPin = galliMapPinCurrent();
+      if (restoredPin) galliMapPinSetPosition(restoredPin);
+    }
+
+    var galliTokenInput = document.createElement('input');
+    galliTokenInput.type = 'password';
+    galliTokenInput.className = 'npw-input';
+    galliTokenInput.id = 'galliMapToken';
+    galliTokenInput.placeholder = 'GalliMap access token';
+    galliTokenInput.value = galliMapToken();
+    galliBody.appendChild(galliTokenInput);
+
+    var galliRadiusInput = document.createElement('input');
+    galliRadiusInput.type = 'number';
+    galliRadiusInput.className = 'npw-input';
+    galliRadiusInput.id = 'galliMapRadius';
+    galliRadiusInput.min = '1';
+    galliRadiusInput.value = String(galliMapRadius());
+    galliRadiusInput.title = 'Search radius in metres passed to getnearestimage.';
+    galliBody.appendChild(galliRadiusInput);
+
+    var galliStatus = npwCreate('div', 'npw-status', '');
+    galliStatus.id = 'galliMapStatus';
+    galliBody.appendChild(galliStatus);
+
+    var galliButtonRow = npwButtonRow(galliBody);
+    npwButton(galliButtonRow, 'Show at map centre', 'Query GalliMap for the capture nearest the map centre', 'primary')
+      .addEventListener('click', function () {
+        var center = wmeSDK.Map.getMapCenter();
+        if (!center) {
+          galliStatus.textContent = 'Map centre not available yet.';
+          return;
+        }
+        galliMapShowAt(center, galliStatus);
+      });
+    npwButton(galliButtonRow, 'Hide viewer', 'Close the GalliMap viewer and release its WebGL context', 'danger')
+      .addEventListener('click', function () {
+        hideGalliMap360Viewer();
+        galliStatus.textContent = 'Hidden.';
+      });
+
+    galliTokenInput.addEventListener('change', function () {
+      npwSaveString(GALLIMAP_TOKEN_KEY, galliTokenInput.value.trim());
+      galliStatus.textContent = galliTokenInput.value.trim() ? 'Token saved.' : 'Token cleared.';
+    });
+    galliRadiusInput.addEventListener('change', function () {
+      npwSaveString(GALLIMAP_RADIUS_KEY, galliRadiusInput.value);
+    });
+
+    // GalliMap lookup at a clicked point. The SDK's SdkMouseEvent payload carries ONLY
+    // { lat, lon, viewportX, viewportY, x, y } - there is no altKey/ctrlKey/shiftKey, so
+    // the modifier must be read from the native event. A double-click is accepted too, so
+    // the lookup is reachable without a keyboard. A plain single click still belongs to
+    // the WMS GetFeatureInfo handler above, which already owns wme-map-mouse-click.
+    function galliMapClickWantsLookup(nativeEvent, evt) {
+      if (nativeEvent && nativeEvent.altKey) return true;
+      return !!(evt && evt.__galliDoubleClick);
+    }
+    var _galliLastClickAt = 0;
+    wmeSDK.Events.on({
+      eventName: 'wme-map-mouse-click',
+      eventHandler: function (evt) {
+        if (!evt || !galliMapToken()) return;
+        // The SDK event does not forward the mouse event, so read the modifier from the
+        // DOM event that is dispatching right now (captured by the listener below).
+        var native = window.__npwLastMapMouseEvent || null;
+        var now = Date.now();
+        evt.__galliDoubleClick = now - _galliLastClickAt < 350;
+        _galliLastClickAt = now;
+
+        // Pin mode: a plain click (no Alt, not part of a double-click) MOVES the pin and
+        // looks up that point once. Deliberately one request per placement - fetching on
+        // pointer-move would hammer the user's metered GalliMap token.
+        if (galliPinCheckbox.checked && !galliMapClickWantsLookup(native, evt)) {
+          var point = { lon: evt.lon, lat: evt.lat };
+          galliMapPinSetPosition(point);
+          galliStatus.textContent =
+            'Pin at ' + point.lat.toFixed(5) + ', ' + point.lon.toFixed(5) + ' - looking up\u2026';
+          galliMapShowAt(point, galliStatus);
+          return;
+        }
+
+        if (!galliMapClickWantsLookup(native, evt)) return;
+        galliMapShowAt({ lon: evt.lon, lat: evt.lat }, galliStatus);
+      },
+    });
+
+    // Clicking the pin itself re-opens its captured panorama (no re-fetch of the lookup -
+    // the image is already cached against the same URL).
+    wmeSDK.Events.on({
+      eventName: 'wme-layer-feature-clicked',
+      eventHandler: function (evt) {
+        if (!evt || evt.layerName !== GALLIMAP_PIN_LAYER) return;
+        var pin = galliMapPinCurrent();
+        if (!pin) return;
+        galliMapShowAt(pin, galliStatus);
+      },
+    });
+
+    // WME's map swallows mouse events before the SDK sees them, so capture the native
+    // event at the document level (capture phase) purely to read its modifier state.
+    document.addEventListener(
+      'mousedown',
+      function (e) {
+        window.__npwLastMapMouseEvent = e;
+      },
+      true
+    );
+
     fillWMSLayersSelectList();
     syncOpacityControlToSelection();
     refreshWmsShiftStatus();
@@ -6246,6 +7187,9 @@ For GIS tools or legacy clients, use WMS 1.1.1 + EPSG:4326.*/
     for (var key in WMSLayerTogglers) syncTogglerVisibility(WMSLayerTogglers[key]);
     // The closure markers are not a WMS toggler, but the master checkbox still owns them.
     syncClosureLayerVisibility();
+    // Same for the GalliMap pin. init() publishes the function to a module-level hook,
+    // because this one cannot see the helpers defined inside init()'s scope.
+    if (syncGalliMapPinVisibilityHook) syncGalliMapPinVisibilityHook();
   }
 
   // State is persisted under the pre-existing "WMSLayers" key, so preferences saved by
