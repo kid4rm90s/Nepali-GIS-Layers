@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.10.09.012
+// @version       2026.10.09.013
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -99,6 +99,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     gallimapToken: '_wme_nepali_wms_gallimap_token',   // bare GalliMap access token (string)
     gallimapRadius: '_wme_nepali_wms_gallimap_radius', // bare search radius in metres (string)
     gallimapViewer: '_wme_nepali_wms_gallimap_viewer', // { width, height, left, top } of the 360 overlay
+    gallimapEnabled: '_wme_nepali_wms_gallimap_enabled', // 'true' | 'false' - master switch for the whole feature
+    gallimapPin: '_wme_nepali_wms_gallimap_pin',       // { lon, lat } of the drop-pin
+    gallimapPinOn: '_wme_nepali_wms_gallimap_pin_on',  // 'true' | 'false' - drop-pin switch
     layerTogglers: 'WMSLayers',                  // { togglerKey: boolean } - pre-existing key
   };
 
@@ -185,6 +188,16 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
   var GALLIMAP_TOKEN_KEY = '_wme_nepali_wms_gallimap_token';
   var GALLIMAP_RADIUS_KEY = '_wme_nepali_wms_gallimap_radius';
   var GALLIMAP_DEFAULT_RADIUS = 20;
+  var GALLIMAP_ENABLED_KEY = '_wme_nepali_wms_gallimap_enabled';
+
+  /**
+   * Master switch for the whole GalliMap feature. Defaults to OFF: a user who never opens
+   * the card should get no pin, no map-click handling and no requests.
+   * @returns {boolean}
+   */
+  function galliMapEnabled() {
+    return npwLoadString(GALLIMAP_ENABLED_KEY, null) === 'true';
+  }
 
   /** The GalliMap access token, or '' when the user has not set one. */
   function galliMapToken() {
@@ -3988,13 +4001,16 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       _galliMapPinBuilt = false;
     }
 
-    // The pin follows the script's master layer-switcher checkbox, like every other layer
-    // the script draws. Without this the master switch would hide the other layers and
-    // leave the pin stranded on the map.
+    // The pin is hidden when either the script's master layer-switcher checkbox is off
+    // (like every other layer the script draws) or the GalliMap feature itself is
+    // switched off.
     function syncGalliMapPinVisibility() {
       if (!_galliMapPinBuilt) return;
       try {
-        wmeSDK.Map.setLayerVisibility({ layerName: GALLIMAP_PIN_LAYER, visibility: !!masterLayerToggleOn });
+        wmeSDK.Map.setLayerVisibility({
+          layerName: GALLIMAP_PIN_LAYER,
+          visibility: !!masterLayerToggleOn && galliMapEnabled(),
+        });
       } catch (e) {
         // Layer not present yet - nothing to sync.
       }
@@ -4450,6 +4466,13 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     // the CAPTURE, not the requested point - the two can be up to the threshold apart,
     // so anchoring on the request would put the viewer where the photo is not from.
     function galliMapShowAt(point, statusEl) {
+      // Single choke point for all three lookup paths (pin click, Alt/double-click, the
+      // "Show at map centre" button), so the master switch is enforced here rather than
+      // in each caller.
+      if (!galliMapEnabled()) {
+        if (statusEl) statusEl.textContent = 'GalliMap 360 is switched off.';
+        return;
+      }
       if (!galliMapToken()) {
         if (statusEl) statusEl.textContent = 'Paste a GalliMap access token first.';
         galliMapToast('warning', 'Paste a GalliMap access token in the GalliMap 360 card first.');
@@ -6240,6 +6263,34 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       )
     );
 
+    // Master switch for the whole feature. Off by default: with it off the card shows a
+    // single checkbox, no pin is drawn, no map click is consumed and no request is made.
+    // Everything below stays hidden until it is on.
+    var galliEnableRow = npwCreate('div', 'npw-layer-item');
+    var galliEnableCheckbox = document.createElement('input');
+    galliEnableCheckbox.type = 'checkbox';
+    galliEnableCheckbox.className = 'npw-checkbox';
+    galliEnableCheckbox.id = 'galliMapEnableToggle';
+    galliEnableCheckbox.checked = galliMapEnabled();
+    var galliEnableLabel = npwCreate('label', 'npw-label', 'Enable GalliMap 360\u00b0');
+    galliEnableLabel.title =
+      'Master switch for the whole GalliMap feature. Off means no pin, no map-click ' +
+      'lookups and no requests to GalliMap.';
+    // Deliberately no htmlFor: this click handler is the only toggle path, so clicking the
+    // label cannot double-toggle the checkbox (same pattern as the other cards).
+    galliEnableLabel.addEventListener('click', function (e) {
+      if (e.target === galliEnableCheckbox) return;
+      galliEnableCheckbox.checked = !galliEnableCheckbox.checked;
+      galliEnableCheckbox.dispatchEvent(new Event('change'));
+    });
+    galliEnableRow.appendChild(galliEnableCheckbox);
+    galliEnableRow.appendChild(galliEnableLabel);
+    galliBody.appendChild(galliEnableRow);
+
+    // Everything that talks to GalliMap lives in here, so one switch hides it all.
+    var galliControls = npwCreate('div', 'npw-galli-controls');
+    galliBody.appendChild(galliControls);
+
     // Drop-pin switch. Off by default: with it off no marker is drawn and no map clicks
     // are consumed, so the script stays out of the way until asked for.
     var galliPinRow = npwCreate('div', 'npw-layer-item');
@@ -6259,7 +6310,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     });
     galliPinRow.appendChild(galliPinCheckbox);
     galliPinRow.appendChild(galliPinLabel);
-    galliBody.appendChild(galliPinRow);
+    galliControls.appendChild(galliPinRow);
 
     galliPinCheckbox.addEventListener('change', function () {
       var on = galliPinCheckbox.checked;
@@ -6274,8 +6325,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       }
     });
 
-    // Restore the pin on load if it was left switched on.
-    if (galliPinCheckbox.checked) {
+    // Restore the pin on load if it was left switched on AND the whole feature is enabled.
+    // When the feature is off nothing is drawn; the pin is re-placed if it is switched on again.
+    if (galliPinCheckbox.checked && galliMapEnabled()) {
       var restoredPin = galliMapPinCurrent();
       if (restoredPin) galliMapPinSetPosition(restoredPin);
     }
@@ -6286,7 +6338,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     galliTokenInput.id = 'galliMapToken';
     galliTokenInput.placeholder = 'GalliMap access token';
     galliTokenInput.value = galliMapToken();
-    galliBody.appendChild(galliTokenInput);
+    galliControls.appendChild(galliTokenInput);
 
     var galliRadiusInput = document.createElement('input');
     galliRadiusInput.type = 'number';
@@ -6295,13 +6347,13 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     galliRadiusInput.min = '1';
     galliRadiusInput.value = String(galliMapRadius());
     galliRadiusInput.title = 'Search radius in metres passed to getnearestimage.';
-    galliBody.appendChild(galliRadiusInput);
+    galliControls.appendChild(galliRadiusInput);
 
     var galliStatus = npwCreate('div', 'npw-status', '');
     galliStatus.id = 'galliMapStatus';
-    galliBody.appendChild(galliStatus);
+    galliControls.appendChild(galliStatus);
 
-    var galliButtonRow = npwButtonRow(galliBody);
+    var galliButtonRow = npwButtonRow(galliControls);
     npwButton(galliButtonRow, 'Show at map centre', 'Query GalliMap for the capture nearest the map centre', 'primary')
       .addEventListener('click', function () {
         var center = wmeSDK.Map.getMapCenter();
@@ -6328,6 +6380,32 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
       npwSaveString(GALLIMAP_RADIUS_KEY, galliRadiusInput.value);
     });
 
+    // Applies the master switch: hides the controls, drops the pin and closes the viewer
+    // when off; re-places the pin when on. Every lookup path also tests galliMapEnabled().
+    function applyGalliMapEnabled(enabled) {
+      galliControls.style.display = enabled ? '' : 'none';
+      if (enabled) {
+        if (galliPinCheckbox.checked) {
+          galliMapPinSetPosition(galliMapPinCurrent() || wmeSDK.Map.getMapCenter() || { lon: 85.324, lat: 27.717 });
+        }
+        galliStatus.textContent = '';
+        return;
+      }
+      galliMapPinRemove();
+      hideGalliMap360Viewer();
+      galliStatus.textContent = 'GalliMap 360 is switched off.';
+    }
+
+    galliEnableCheckbox.addEventListener('change', function () {
+      var on = galliEnableCheckbox.checked;
+      npwSaveString(GALLIMAP_ENABLED_KEY, on ? 'true' : 'false');
+      applyGalliMapEnabled(on);
+      galliMapToast('info', on ? 'GalliMap 360 enabled.' : 'GalliMap 360 disabled.');
+    });
+
+    // First draw, from the saved master switch.
+    applyGalliMapEnabled(galliMapEnabled());
+
     // GalliMap lookup at a clicked point. The SDK's SdkMouseEvent payload carries ONLY
     // { lat, lon, viewportX, viewportY, x, y } - there is no altKey/ctrlKey/shiftKey, so
     // the modifier must be read from the native event. A double-click is accepted too, so
@@ -6341,7 +6419,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     wmeSDK.Events.on({
       eventName: 'wme-map-mouse-click',
       eventHandler: function (evt) {
-        if (!evt || !galliMapToken()) return;
+        if (!evt || !galliMapEnabled() || !galliMapToken()) return;
         // The SDK event does not forward the mouse event, so read the modifier from the
         // DOM event that is dispatching right now (captured by the listener below).
         var native = window.__npwLastMapMouseEvent || null;
@@ -6371,7 +6449,7 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     wmeSDK.Events.on({
       eventName: 'wme-layer-feature-clicked',
       eventHandler: function (evt) {
-        if (!evt || evt.layerName !== GALLIMAP_PIN_LAYER) return;
+        if (!evt || !galliMapEnabled() || evt.layerName !== GALLIMAP_PIN_LAYER) return;
         var pin = galliMapPinCurrent();
         if (!pin) return;
         galliMapShowAt(pin, galliStatus);
