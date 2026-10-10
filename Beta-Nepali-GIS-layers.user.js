@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name          Beta - Nepali GIS layers
-// @version       2026.10.09.013
+// @version       2026.10.10.014
 // @author        kid4rm90s
 // @description   Displays layers from Nepali GIS services in WME
 // @include      /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor.*$/
@@ -4823,6 +4823,10 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 
     // Map click handler
     wmeSDK.Events.on({ eventName: 'wme-map-mouse-click', eventHandler: function (evt) {
+      // Alt-click belongs to the GalliMap 360 lookup (see the GalliMap card); skip the WMS
+      // GetFeatureInfo popup so the two do not both open on one gesture.
+      var nativeClick = window.__npwLastMapMouseEvent || null;
+      if (nativeClick && nativeClick.altKey) return;
       console.log('[WMS] Map clicked at', { viewportX: evt.viewportX, viewportY: evt.viewportY }, { lat: evt.lat, lon: evt.lon });
       const visibleLayers = getAllVisibleWMSLayerInfo();
       if (!visibleLayers.length) {
@@ -6258,8 +6262,9 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         'npw-status',
         'Shows the nearest GalliMap 360\u00b0 capture for the map centre. Requires a GalliMap access ' +
           'token (paste it below - it is kept only in this browser). Switch "Drop pin on map" on and ' +
-          'click the map to move the lookup pin there; each click fetches once. Alt-click or ' +
-          'double-click the map also looks up that point directly.'
+          'Alt-click the map to move the lookup pin there; each Alt-click fetches once. A plain ' +
+          'click is left untouched for normal WME editing. Double-click the map also looks up ' +
+          'that point directly.'
       )
     );
 
@@ -6299,10 +6304,10 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
     galliPinCheckbox.className = 'npw-checkbox';
     galliPinCheckbox.id = 'galliMapPinToggle';
     galliPinCheckbox.checked = npwLoadString(GALLIMAP_PIN_ENABLED_KEY, null) === 'true';
-    var galliPinLabel = npwCreate('label', 'npw-label', 'Drop pin on map');
+    var galliPinLabel = npwCreate('label', 'npw-label', 'Drop pin on map (Alt-click)');
     galliPinLabel.title =
-      'Click the map to move the GalliMap pin and fetch the 360 capture nearest that point. ' +
-      'Each placement makes one request to GalliMap.';
+      'Alt-click the map to move the GalliMap pin and fetch the 360 capture nearest that point. ' +
+      'A plain click is not affected. Each placement makes one request to GalliMap.';
     galliPinLabel.addEventListener('click', function (e) {
       if (e.target === galliPinCheckbox) return;
       galliPinCheckbox.checked = !galliPinCheckbox.checked;
@@ -6408,9 +6413,10 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
 
     // GalliMap lookup at a clicked point. The SDK's SdkMouseEvent payload carries ONLY
     // { lat, lon, viewportX, viewportY, x, y } - there is no altKey/ctrlKey/shiftKey, so
-    // the modifier must be read from the native event. A double-click is accepted too, so
-    // the lookup is reachable without a keyboard. A plain single click still belongs to
-    // the WMS GetFeatureInfo handler above, which already owns wme-map-mouse-click.
+    // the modifier must be read from the native event. An Alt-click (and a double-click,
+    // so the lookup is reachable without a keyboard) triggers the lookup; a plain single
+    // click still belongs to the WMS GetFeatureInfo handler above, which owns
+    // wme-map-mouse-click.
     function galliMapClickWantsLookup(nativeEvent, evt) {
       if (nativeEvent && nativeEvent.altKey) return true;
       return !!(evt && evt.__galliDoubleClick);
@@ -6427,10 +6433,12 @@ and the WME CSS-variable theming are borrowed from the Croatian WMS layers scrip
         evt.__galliDoubleClick = now - _galliLastClickAt < 350;
         _galliLastClickAt = now;
 
-        // Pin mode: a plain click (no Alt, not part of a double-click) MOVES the pin and
-        // looks up that point once. Deliberately one request per placement - fetching on
+        // Pin mode: an Alt-click (not a plain click, not part of a double-click) MOVES the
+        // pin and looks up that point once. Plain left-click is deliberately left alone so
+        // it keeps its usual WME meaning (select a feature); the pin move is the one action
+        // that needs a modifier. Deliberately one request per placement - fetching on
         // pointer-move would hammer the user's metered GalliMap token.
-        if (galliPinCheckbox.checked && !galliMapClickWantsLookup(native, evt)) {
+        if (galliPinCheckbox.checked && galliMapClickWantsLookup(native, evt) && !evt.__galliDoubleClick) {
           var point = { lon: evt.lon, lat: evt.lat };
           galliMapPinSetPosition(point);
           galliStatus.textContent =
